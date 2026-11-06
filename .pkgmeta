@@ -4,3 +4,6 @@ ignore:
   - .luarc.json
   - .github
   - art
+
+required-dependencies:
+  - questiedb
