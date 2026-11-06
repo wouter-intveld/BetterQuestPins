@@ -5,6 +5,6 @@
 ## Author: Wouter
 ## Dependencies: QuestieDB
 ## SavedVariables: BetterQuestPinsDB
-## IconTexture: Interface\QuestFrame\UI-QuestLog-BookIcon
+## IconTexture: Interface\AddOns\BetterQuestPins\icon
 
 BetterQuestPins.xml
