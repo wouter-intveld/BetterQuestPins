@@ -15,6 +15,7 @@
 ## Notes: World map pins for every quest you can pick up. Quest data: QuestieDB by Lawgon and TheCrux_BB.
 ## Author: Wouter
 ## X-Credits: QuestieDB by Lawgon and TheCrux_BB, with data from Questie and its contributors
+## X-Curse-Project-ID: 1786993
 ## Dependencies: QuestieDB
 ## SavedVariables: BetterQuestPinsDB
 ## IconTexture: Interface\AddOns\BetterQuestPins\icon
