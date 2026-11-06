@@ -1,5 +1,16 @@
 ## Interface: 16001
 ## Title: |cff33ff99Better|rQuestPins
+## Category: Quests
+## Category-deDE: Quests
+## Category-esES: Misiones
+## Category-esMX: Misiones
+## Category-frFR: Quêtes
+## Category-itIT: Missioni
+## Category-koKR: 퀘스트
+## Category-ptBR: Missões
+## Category-ruRU: Задания
+## Category-zhCN: 任务
+## Category-zhTW: 任務
 ## Version: @project-version@
 ## Notes: World map pins for every quest you can pick up. Quest data: QuestieDB by Lawgon and TheCrux_BB.
 ## Author: Wouter
