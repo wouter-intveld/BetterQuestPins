@@ -22,3 +22,13 @@ BetterQuestPins.
 [QuestieDB](https://www.curseforge.com/wow/addons/questiedb) provides the
 quest and quest giver data. BetterQuestPins reads it at runtime and ships
 none of it.
+
+## Credits
+
+The quest data comes from
+[QuestieDB](https://www.curseforge.com/wow/addons/questiedb) by Lawgon and
+TheCrux_BB. Its data started out in
+[Questie](https://github.com/Questie/Questie) and was gathered over the years by
+Muehe, Drejjmit, Dyaxler, Cheeq, TechnoHunter, Yttrium and more than a hundred
+other contributors. Every pin on your map is their work. If BetterQuestPins
+helps you, please thank them and support QuestieDB and Questie.
