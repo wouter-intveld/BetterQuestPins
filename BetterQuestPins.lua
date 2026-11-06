@@ -4,7 +4,7 @@
 
 local ADDON = ...
 local BRAND = "|cff33ff99Better|rQuestPins"
-local DEFAULTS = { showPins = true, smallPins = false }
+local DEFAULTS = { showPins = true, smallPins = false, maxAbove = 4, holidays = false }
 local db
 
 local ZoneDB = LibQuestieDB.Support.Get("ZoneDB")
@@ -51,19 +51,46 @@ local function AddStarter(questID, spawns)
     end
 end
 
--- Holiday and world event quests: their givers stand there all year, the quests don't.
-local EVENT_SORTS = {
-    [-404] = true, [-402] = true, [-378] = true, [-376] = true, [-375] = true, [-374] = true,
-    [-370] = true, [-369] = true, [-366] = true, [-364] = true, [-41] = true, [-22] = true,
-    [-21] = true, [-368] = true, [-365] = true, [-1000] = true,
+-- World events, generic seasonal and temporary quests: never pinned.
+local EVENT_SORTS = { [-22] = true, [-368] = true, [-365] = true, [-1000] = true }
+
+-- Holiday quest sorts, and words of the calendar title that names each holiday.
+-- Matched on the English title for now, so other client languages see no holiday pins.
+local HOLIDAY_SORTS = {
+    [-404] = "winter veil", [-402] = "harvest festival", [-378] = "children's week",
+    [-376] = "love is in the air", [-375] = "pilgrim", [-374] = "noblegarden",
+    [-370] = "brewfest", [-369] = "midsummer", [-366] = "lunar festival",
+    [-364] = "darkmoon", [-41] = "day of the dead", [-21] = "hallow's end",
 }
+
+local holidaySortOf = {} -- questID -> holiday sort, for holiday quests only
+local activeHolidays = {} -- holiday sort -> true while that holiday runs today
+local holidayDay -- the day activeHolidays was read for
+
+-- A few calendar calls, once a day; map redraws only read the cached result.
+local function ReadHolidays()
+    wipe(activeHolidays)
+    local now = C_DateAndTime.GetCurrentCalendarTime()
+    holidayDay = now.monthDay
+    if not (C_Calendar and C_Calendar.GetNumDayEvents) then return end
+    for i = 1, C_Calendar.GetNumDayEvents(0, now.monthDay) do
+        local event = C_Calendar.GetDayEvent(0, now.monthDay, i)
+        local title = event and event.calendarType == "HOLIDAY" and event.title and event.title:lower()
+        if title then
+            for sort, words in pairs(HOLIDAY_SORTS) do
+                if title:find(words, 1, true) then activeHolidays[sort] = true end
+            end
+        end
+    end
+end
 
 local function BuildIndex()
     byMap = {}
     for _, questID in ipairs(QuestDB.GetAllIds()) do
         -- Unnamed entries are placeholders the database knows only by ID.
-        local starters = not EVENT_SORTS[QuestDB.zoneOrSort(questID) or 0] and QuestDB.name(questID)
-            and QuestDB.startedBy(questID)
+        local sort = QuestDB.zoneOrSort(questID) or 0
+        if HOLIDAY_SORTS[sort] then holidaySortOf[questID] = sort end
+        local starters = not EVENT_SORTS[sort] and QuestDB.name(questID) and QuestDB.startedBy(questID)
         if starters then
             for _, npcID in ipairs(starters[1] or {}) do
                 local spawns = NpcDB.spawns(npcID)
@@ -125,7 +152,9 @@ local function IsAvailable(questID)
     local questLevel = QuestDB.questLevel(questID)
     if questLevel and questLevel > 0 and questLevel < player.grayBelow then return false end
     -- Red quests: allowed to pick up, but not something to walk to yet.
-    if questLevel and questLevel >= player.level + 5 then return false end
+    if questLevel and questLevel > player.level + db.maxAbove then return false end
+    local holiday = holidaySortOf[questID]
+    if holiday and not (db.holidays and activeHolidays[holiday]) then return false end
     local races = QuestDB.requiredRaces(questID)
     if races and races > 0 and bit.band(races, player.raceBit) == 0 then return false end
     local classes = QuestDB.requiredClasses(questID)
@@ -219,6 +248,7 @@ function DataProvider:RefreshAllData()
     local spots = byMap[mapID]
     if not spots then return end
     RefreshPlayer()
+    if db.holidays and holidayDay ~= C_DateAndTime.GetCurrentCalendarTime().monthDay then ReadHolidays() end
     local size = db.smallPins and 16 or 22
     for _, spot in pairs(spots) do
         local names
@@ -256,6 +286,17 @@ local function RegisterSettings()
     end
     Checkbox("showPins", "Show quest pins", "Pin quests you can pick up on the world map.")
     Checkbox("smallPins", "Small pins", "Draw the pins smaller.")
+    local above = Settings.RegisterProxySetting(category, "BQP_maxAbove", Settings.VarType.Number,
+        "Levels above you", DEFAULTS.maxAbove, function() return db.maxAbove end, function(value)
+            db.maxAbove = value
+            RefreshIfOpen()
+        end)
+    local options = Settings.CreateSliderOptions(0, 10, 1)
+    options:SetLabelFormatter(MinimalSliderWithSteppersMixin.Label.Right, function(value)
+        return ("+%d"):format(value)
+    end)
+    Settings.CreateSlider(category, above, options, "Hide quests more than this many levels above you.")
+    Checkbox("holidays", "Holiday quests", "Also pin quests of a holiday that is running today, like the Darkmoon Faire or Hallow's End.")
     Settings.RegisterAddOnCategory(category)
 end
 
@@ -265,6 +306,10 @@ WorldMapFrame:AddDataProvider(DataProvider)
 local events = CreateFrame("Frame")
 events:RegisterEvent("ADDON_LOADED")
 events:SetScript("OnEvent", function(self, event, name)
+    if event == "CALENDAR_UPDATE_EVENT_LIST" then
+        ReadHolidays()
+        return RefreshIfOpen()
+    end
     if event ~= "ADDON_LOADED" then return RefreshIfOpen() end
     if name ~= ADDON then return end
     self:UnregisterEvent("ADDON_LOADED")
@@ -274,6 +319,11 @@ events:SetScript("OnEvent", function(self, event, name)
         if db[k] == nil then db[k] = v end
     end
     RegisterSettings()
+    -- Calendar data loads after a request; CALENDAR_UPDATE_EVENT_LIST says it arrived.
+    if C_Calendar and C_Calendar.OpenCalendar then
+        self:RegisterEvent("CALENDAR_UPDATE_EVENT_LIST")
+        C_Calendar.OpenCalendar()
+    end
     for _, e in ipairs({ "QUEST_ACCEPTED", "QUEST_TURNED_IN", "QUEST_REMOVED", "PLAYER_LEVEL_UP" }) do
         self:RegisterEvent(e)
     end
