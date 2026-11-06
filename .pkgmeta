@@ -1,0 +1,6 @@
+package-as: BetterQuestPins
+
+ignore:
+  - .luarc.json
+  - .github
+  - art

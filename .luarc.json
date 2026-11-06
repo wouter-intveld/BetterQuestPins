@@ -1,0 +1,43 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
+  "runtime.version": "Lua 5.1",
+  "workspace.library": [
+    "~/.local/share/wow-api/Annotations/Core"
+  ],
+  "workspace.checkThirdParty": false,
+  "diagnostics.globals": [
+    "BetterQuestTrackerDB",
+    "BetterQuestTrackerCharDB",
+    "SLASH_BETTERQUESTTRACKER1",
+    "SlashCmdList",
+    "Settings",
+    "MinimalSliderWithSteppersMixin",
+    "GameTooltip_Hide",
+    "CooldownFrame_Set",
+    "GetQuestDifficultyColor",
+    "QuestMapFrame_OpenToQuestDetails",
+    "ObjectiveTrackerFrame",
+    "DurabilityFrame",
+    "QuestMapQuestOptions_AbandonQuest",
+    "ChatEdit_GetActiveWindow",
+    "ChatEdit_InsertLink",
+    "GetQuestTimers",
+    "GetQuestIndexForTimer",
+    "GetQuestLogTimeLeft",
+    "SelectQuestLogEntry",
+    "GetQuestLogSelection",
+    "LibQuestieDB",
+    "QuestDB",
+    "NpcDB",
+    "ObjectDB",
+    "BetterQuestPinsDB",
+    "BetterQuestPinsPinMixin",
+    "MapCanvasPinMixin",
+    "MapCanvasDataProviderMixin",
+    "WorldMapFrame",
+    "UiMapPoint",
+    "AVAILABLE_QUEST",
+    "AVAILABLE_QUESTS",
+    "GetQuestGreenRange"
+  ]
+}

@@ -1,0 +1,10 @@
+## Interface: 16001
+## Title: |cff33ff99Better|rQuestPins
+## Version: @project-version@
+## Notes: World map pins for every quest you can pick up, using QuestieDB's data
+## Author: Wouter
+## Dependencies: QuestieDB
+## SavedVariables: BetterQuestPinsDB
+## IconTexture: Interface\QuestFrame\UI-QuestLog-BookIcon
+
+BetterQuestPins.xml
