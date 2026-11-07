@@ -3,7 +3,7 @@
 -- givers' positions from QuestieDB.
 
 local ADDON = ...
-local BRAND = "|cff33ff99Better|rQuestPins"
+local BRAND = "|cffcda552Better|rQuestPins"
 local DEFAULTS = { showPins = true, smallPins = false, maxAbove = 4, holidays = false }
 local db
 

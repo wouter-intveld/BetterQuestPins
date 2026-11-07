@@ -1,5 +1,5 @@
 ## Interface: 16001
-## Title: |cff33ff99Better|rQuestPins
+## Title: |cffcda552Better|rQuestPins
 ## Category: Quests
 ## Category-deDE: Quests
 ## Category-esES: Misiones
