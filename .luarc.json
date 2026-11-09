@@ -38,6 +38,7 @@
     "UiMapPoint",
     "AVAILABLE_QUEST",
     "AVAILABLE_QUESTS",
-    "GetQuestGreenRange"
+    "GetQuestGreenRange",
+    "GetFactionInfoByID"
   ]
 }

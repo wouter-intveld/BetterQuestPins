@@ -2,7 +2,7 @@
 -- Puts a pin on the world map for every quest the character can pick up, using the quest
 -- givers' positions from QuestieDB.
 
-local ADDON = ...
+local ADDON, ns = ...
 local BRAND = "|cffcda552Better|rQuestPins"
 local DEFAULTS = { showPins = true, smallPins = false, maxAbove = 4, holidays = false }
 local db
@@ -87,10 +87,12 @@ end
 local function BuildIndex()
     byMap = {}
     for _, questID in ipairs(QuestDB.GetAllIds()) do
-        -- Unnamed entries are placeholders the database knows only by ID.
+        -- Unnamed entries are placeholders the database knows only by ID; blacklisted
+        -- ones exist in the data but cannot be taken in game.
         local sort = QuestDB.zoneOrSort(questID) or 0
         if HOLIDAY_SORTS[sort] then holidaySortOf[questID] = sort end
-        local starters = not EVENT_SORTS[sort] and QuestDB.name(questID) and QuestDB.startedBy(questID)
+        local starters = not ns.BLACKLIST[questID] and not EVENT_SORTS[sort] and QuestDB.name(questID)
+            and QuestDB.startedBy(questID)
         if starters then
             for _, npcID in ipairs(starters[1] or {}) do
                 local spawns = NpcDB.spawns(npcID)
@@ -113,11 +115,33 @@ local function InLog(questID)
     return C_QuestLog.GetLogIndexForQuestID(questID) ~= nil
 end
 
-local function AllCompleted(list)
+local function Taken(questID)
+    return questID and questID ~= 0 and (IsCompleted(questID) or InLog(questID))
+end
+
+-- Every prerequisite done. Finishing an alternative to one counts as doing it,
+-- except for IDs the data marks negative, which must be done themselves.
+local function GroupDone(list)
     for _, id in ipairs(list) do
-        if not IsCompleted(id) then return false end
+        local done = IsCompleted(math.abs(id))
+        if not done and id > 0 then
+            for _, alt in ipairs(QuestDB.exclusiveTo(id) or {}) do
+                if IsCompleted(alt) then done = true break end
+            end
+        end
+        if not done then return false end
     end
     return true
+end
+
+-- Reputation as a {factionID, value} pair; value is standing in reputation points.
+local function Reputation(factionID)
+    if C_Reputation and C_Reputation.GetFactionDataByID then
+        local data = C_Reputation.GetFactionDataByID(factionID)
+        return data and data.currentStanding
+    end
+    local _, _, _, _, _, value = GetFactionInfoByID(factionID)
+    return value
 end
 
 local function AnyCompleted(list)
@@ -161,12 +185,40 @@ local function IsAvailable(questID)
     if classes and classes > 0 and bit.band(classes, player.classBit) == 0 then return false end
     -- Profession quests: skill levels aren't checked, so leave them out rather than guess.
     if QuestDB.requiredSkill(questID) then return false end
-    local group = QuestDB.preQuestGroup(questID)
-    if group and #group > 0 and not AllCompleted(group) then return false end
     local single = QuestDB.preQuestSingle(questID)
-    if single and #single > 0 and not AnyCompleted(single) then return false end
+    if single and #single > 0 then
+        if not AnyCompleted(single) then return false end
+    else
+        local group = QuestDB.preQuestGroup(questID)
+        if group and #group > 0 and not GroupDone(group) then return false end
+    end
+    -- Done or in the log: a sibling that rules this one out, the next quest in the chain,
+    -- or the quest a breadcrumb leads to. The game often skips flagging the earlier one.
     local exclusive = QuestDB.exclusiveTo(questID)
     if exclusive and AnyTaken(exclusive) then return false end
+    if Taken(QuestDB.nextQuestInChain(questID)) then return false end
+    if Taken(QuestDB.breadcrumbForQuestId(questID)) then return false end
+    for _, id in ipairs(QuestDB.breadcrumbs(questID) or {}) do
+        if InLog(id) then return false end
+    end
+    local parent = QuestDB.parentQuest(questID)
+    if parent and parent ~= 0 and not InLog(parent) then return false end
+    local disabledBy = QuestDB.disabledByQuest(questID)
+    if disabledBy and disabledBy ~= 0 and InLog(disabledBy) then return false end
+    local untilDone = QuestDB.availableUntilCompleted(questID)
+    if untilDone and untilDone ~= 0 and IsCompleted(untilDone) then return false end
+    local startingWith = QuestDB.availableStartingWith(questID)
+    if startingWith and startingWith ~= 0 and not Taken(startingWith) then return false end
+    local minRep = QuestDB.requiredMinRep(questID)
+    if minRep and (Reputation(minRep[1]) or -math.huge) < minRep[2] then return false end
+    local maxRep = QuestDB.requiredMaxRep(questID)
+    if maxRep and (Reputation(maxRep[1]) or -math.huge) >= maxRep[2] then return false end
+    -- Positive: a spell the player must know; negative: one they must not.
+    local spell = QuestDB.requiredSpell(questID)
+    if spell and spell ~= 0 and C_SpellBook and C_SpellBook.IsSpellKnown
+        and (C_SpellBook.IsSpellKnown(math.abs(spell)) == (spell < 0)) then
+        return false
+    end
     return true
 end
 

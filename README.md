@@ -32,3 +32,10 @@ TheCrux_BB. Its data started out in
 Muehe, Drejjmit, Dyaxler, Cheeq, TechnoHunter, Yttrium and more than a hundred
 other contributors. Every pin on your map is their work. If BetterQuestPins
 helps you, please thank them and support QuestieDB and Questie.
+
+## License
+
+BetterQuestPins is licensed under the GNU GPL v3 or later (see LICENSE). Its
+quest blacklist, `Blacklist.lua`, is generated from Questie's own blacklist by
+`tools/gen-blacklist.lua` and is used under the GPLv3, as Questie's license
+allows.
