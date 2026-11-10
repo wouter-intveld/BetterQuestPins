@@ -9,8 +9,10 @@ local DEFAULTS = {
     -- Townsfolk, each type off until ticked.
     tfFlight = false, tfInn = false, tfRepair = false, tfClass = false,
     tfProfession = false, tfBanker = false, tfStable = false,
+    tfOnlyMine = false, -- profession trainers only for professions the character has
 }
 local db
+local mainCategory, townsCategory -- the settings pages, for /bqp
 
 local ZoneDB = LibQuestieDB.Support.Get("ZoneDB")
 
@@ -247,7 +249,8 @@ local TOWNSFOLK = {
 
 -- Trainers share one flag; the subname ("Mage Trainer") tells class from
 -- profession. The class names are the client's own, so this works in any language.
-local function TrainerClass(sub)
+local function TrainerClass(npcID, sub)
+    if ns.CLASS_TRAINER[npcID] then return ns.CLASS_TRAINER[npcID] end -- portal trainers
     if not sub then return nil end
     for token, name in pairs(LOCALIZED_CLASS_NAMES_MALE) do
         local female = LOCALIZED_CLASS_NAMES_FEMALE[token]
@@ -275,7 +278,8 @@ local function BuildTownsIndex()
         local spawns = friendly and NpcDB.spawns(npcID)
         if spawns then
             local name, sub = NpcDB.name(npcID) or "?", NpcDB.subName(npcID)
-            local class = TrainerClass(sub)
+            local class = TrainerClass(npcID, sub)
+            local profession = ns.TRAINER_PROFESSION[npcID]
             for _, t in ipairs(types) do
                 if not t.trainer or (t.trainer == "class") == (class ~= nil) then
                     for areaID, coords in pairs(spawns) do
@@ -286,7 +290,7 @@ local function BuildTownsIndex()
                             for _, c in ipairs(coords) do
                                 if c[1] and c[2] and c[1] >= 0 and c[2] >= 0 then
                                     list[#list + 1] = { x = c[1] / 100, y = c[2] / 100, type = t,
-                                        name = name, sub = sub, class = class }
+                                        name = name, sub = sub, class = class, profession = profession }
                                 end
                             end
                         end
@@ -302,7 +306,7 @@ local function ExplainNpc(npcID)
     local flags = NpcDB.npcFlags(npcID) or 0
     local sub = NpcDB.subName(npcID)
     print(("%s <%s> flags %d, friendly %s, trainer class %s"):format(NpcDB.name(npcID) or "?", sub or "",
-        flags, tostring(NpcDB.friendlyToFaction(npcID)), tostring((TrainerClass(sub)))))
+        flags, tostring(NpcDB.friendlyToFaction(npcID)), tostring((TrainerClass(npcID, sub)))))
     for _, t in ipairs(TOWNSFOLK) do
         if t.flag and bit.band(flags, t.flag) ~= 0 then
             print(("  matches %s, ticked %s"):format(t.name, tostring(db[t.key])))
@@ -328,13 +332,6 @@ local function ExplainNpc(npcID)
         print(("  area %d -> map %s, in index %d time(s)%s"):format(areaID, tostring(mapID), found,
             townsByMap and "" or " (index not built yet)"))
     end
-end
-
-SLASH_BETTERQUESTPINS1 = "/bqp"
-SlashCmdList.BETTERQUESTPINS = function(msg)
-    local id = tonumber((msg or ""):match("^why%s+(%d+)"))
-    if id then return ExplainNpc(id) end
-    print("/bqp why <npcID> - explain why an NPC has a townsfolk pin or not")
 end
 
 local function AnyTownsfolk()
@@ -427,12 +424,28 @@ end
 -- both show; the shared tooltip still lists both.
 local NEAR, NUDGE = 0.005, 0.007
 
+-- Skill line IDs of the professions and secondary skills the character has,
+-- or nil when this client cannot say (then nothing is filtered).
+local function KnownSkills()
+    if not GetProfessions then return nil end
+    local known = {}
+    for _, index in pairs({ GetProfessions() }) do
+        local skillLine = select(7, GetProfessionInfo(index))
+        if skillLine then known[skillLine] = true end
+    end
+    return known
+end
+
 local function AddTownsfolkPins(map, mapID, size, questSpots)
     if not AnyTownsfolk() then return end
     if not townsByMap then BuildTownsIndex() end
     local _, playerClass = UnitClass("player")
+    local known = db.tfOnlyMine and KnownSkills()
     for _, npc in ipairs(townsByMap[mapID] or {}) do
-        if db[npc.type.key] and (npc.type.trainer ~= "class" or npc.class == playerClass) then
+        -- A trainer Questie's lists don't know stays visible: better too many than missing.
+        local wanted = npc.type.trainer ~= "profession" or not known or not npc.profession
+            or known[npc.profession]
+        if db[npc.type.key] and wanted and (npc.type.trainer ~= "class" or npc.class == playerClass) then
             local x, y, pinSize = npc.x, npc.y, size
             for _, q in ipairs(questSpots) do
                 if math.abs(q.x - x) < NEAR and math.abs(q.y - y) < NEAR then
@@ -523,10 +536,39 @@ local function RegisterSettings()
     Checkbox("holidays", "Holiday quests", "Also pin quests of a holiday that is running today, like the Darkmoon Faire or Hallow's End.")
 
     category = Settings.RegisterVerticalLayoutSubcategory(main, "Townsfolk")
+    mainCategory, townsCategory = main, category
     for _, t in ipairs(TOWNSFOLK) do
         Checkbox(t.key, t.name, ("Pin friendly %s on the world map."):format(t.name:lower()))
     end
+    Checkbox("tfOnlyMine", "Only my professions", "Profession trainers only for professions and secondary skills you have.")
     Settings.RegisterAddOnCategory(main)
+end
+
+---------------------------------------------------------------------------
+-- Slash commands
+---------------------------------------------------------------------------
+local function Print(text) print(BRAND .. ": " .. text) end
+
+SLASH_BETTERQUESTPINS1 = "/bqp"
+SlashCmdList.BETTERQUESTPINS = function(msg)
+    local cmd, arg = (msg or ""):lower():match("^(%S*)%s*(.-)$")
+    if cmd == "" or cmd == "config" then
+        Settings.OpenToCategory(mainCategory:GetID())
+    elseif cmd == "town" or cmd == "townsfolk" then
+        Settings.OpenToCategory(townsCategory:GetID())
+    elseif cmd == "pins" then
+        db.showPins = not db.showPins
+        RefreshIfOpen()
+        Print("quest pins " .. (db.showPins and "on" or "off"))
+    elseif cmd == "why" and tonumber(arg) then
+        ExplainNpc(tonumber(arg))
+    else
+        Print("commands:")
+        print("  /bqp - open settings")
+        print("  /bqp town - open the townsfolk settings")
+        print("  /bqp pins - turn quest pins on or off")
+        print("  /bqp why <npcID> - explain why an NPC has a townsfolk pin or not")
+    end
 end
 
 WorldMapFrame:AddDataProvider(DataProvider)
@@ -553,7 +595,7 @@ events:SetScript("OnEvent", function(self, event, name)
         self:RegisterEvent("CALENDAR_UPDATE_EVENT_LIST")
         C_Calendar.OpenCalendar()
     end
-    for _, e in ipairs({ "QUEST_ACCEPTED", "QUEST_TURNED_IN", "QUEST_REMOVED", "PLAYER_LEVEL_UP" }) do
+    for _, e in ipairs({ "QUEST_ACCEPTED", "QUEST_TURNED_IN", "QUEST_REMOVED", "PLAYER_LEVEL_UP", "SKILL_LINES_CHANGED" }) do
         self:RegisterEvent(e)
     end
 end)

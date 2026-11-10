@@ -12,13 +12,23 @@ World of Warcraft Forever client.
   quests are left out.
 - Optional townsfolk pins, each type off until ticked: flight masters,
   innkeepers, repair, class trainers (your class only), profession trainers,
-  bankers and stable masters. Only NPCs friendly to your faction.
+  bankers and stable masters. Only NPCs friendly to your faction. "Only my
+  professions" limits profession trainers to the skills you have.
 - Hover a pin to list its quests, coloured by difficulty. Click it to set a
   map waypoint.
 - Pins update when you accept, turn in or abandon a quest, or level up.
 
 Turn the pins off or make them smaller under Options > AddOns >
 BetterQuestPins.
+
+## Commands
+
+| Command | Action |
+| --- | --- |
+| `/bqp` | Open the settings |
+| `/bqp town` | Open the townsfolk settings |
+| `/bqp pins` | Turn quest pins on or off |
+| `/bqp why <npcID>` | Explain why an NPC has a townsfolk pin or not |
 
 ## Requirements
 
@@ -42,3 +52,6 @@ BetterQuestPins is licensed under the GNU GPL v3 or later (see LICENSE). Its
 quest blacklist, `Blacklist.lua`, is generated from Questie's own blacklist by
 `tools/gen-blacklist.lua` and is used under the GPLv3, as Questie's license
 allows.
+
+The trainer table, `Trainers.lua`, is generated the same way from Questie's
+trainer lists by `tools/gen-trainers.lua`, also under the GPLv3.

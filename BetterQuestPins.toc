@@ -22,4 +22,5 @@
 ## IconTexture: Interface\AddOns\BetterQuestPins\icon
 
 Blacklist.lua
+Trainers.lua
 BetterQuestPins.xml
