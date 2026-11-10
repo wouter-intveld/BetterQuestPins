@@ -13,7 +13,8 @@ local DEFAULTS = {
 }
 local db
 local mainCategory, townsCategory -- the settings pages, for /bqp
--- /bqp perf: how long the map redraws and the one-time index builds take (ms)
+local RequestRedraw -- defined with the data provider; the builder and the settings use it
+-- /bqp perf: how long the map redraws and the index builds take (ms)
 local perf = { last = 0, slowest = 0, count = 0, quests = 0, towns = 0 }
 
 local ZoneDB = LibQuestieDB.Support.Get("ZoneDB")
@@ -93,12 +94,12 @@ local function ReadHolidays()
     end
 end
 
--- The indexes are built in the background after login (StartBackground): run
--- there, a builder hands control back every so often, so no frame waits long.
+-- The indexes are built in the background (StartBackground): a builder hands
+-- control back every so often, so no frame waits long.
 local YIELD_EVERY = 200
 local questReady, townsReady
 local function Pause(i)
-    if i % YIELD_EVERY == 0 and coroutine.running() then coroutine.yield() end
+    if i % YIELD_EVERY == 0 then coroutine.yield() end
 end
 
 local function BuildIndex()
@@ -134,8 +135,43 @@ local function InLog(questID)
     return C_QuestLog.GetLogIndexForQuestID(questID) ~= nil
 end
 
+-- What the database says about a quest never changes in a session: the first
+-- check keeps it in one record, later ones read that. Fields the quest lacks
+-- (the database's 0, or an empty list) are left out.
+local static = {}
+
+local function Some(value) return value and value ~= 0 and value or nil end
+local function List(list) return list and #list > 0 and list or nil end
+
+local function Static(questID)
+    local s = static[questID]
+    if s then return s end
+    s = { requiredLevel = QuestDB.requiredLevel(questID) or 0 }
+    local function keep(key, value) if value then s[key] = value end end
+    keep("maxLevel", Some(QuestDB.requiredMaxLevel(questID)))
+    keep("level", Some(QuestDB.questLevel(questID)))
+    keep("races", Some(QuestDB.requiredRaces(questID)))
+    keep("classes", Some(QuestDB.requiredClasses(questID)))
+    keep("skill", QuestDB.requiredSkill(questID) and true)
+    keep("single", List(QuestDB.preQuestSingle(questID)))
+    keep("group", List(QuestDB.preQuestGroup(questID)))
+    keep("exclusive", List(QuestDB.exclusiveTo(questID)))
+    keep("next", Some(QuestDB.nextQuestInChain(questID)))
+    keep("breadcrumbFor", Some(QuestDB.breadcrumbForQuestId(questID)))
+    keep("breadcrumbs", List(QuestDB.breadcrumbs(questID)))
+    keep("parent", Some(QuestDB.parentQuest(questID)))
+    keep("disabledBy", Some(QuestDB.disabledByQuest(questID)))
+    keep("untilDone", Some(QuestDB.availableUntilCompleted(questID)))
+    keep("startingWith", Some(QuestDB.availableStartingWith(questID)))
+    keep("minRep", List(QuestDB.requiredMinRep(questID)))
+    keep("maxRep", List(QuestDB.requiredMaxRep(questID)))
+    keep("spell", Some(QuestDB.requiredSpell(questID)))
+    static[questID] = s
+    return s
+end
+
 local function Taken(questID)
-    return questID and questID ~= 0 and (IsCompleted(questID) or InLog(questID))
+    return questID ~= nil and (IsCompleted(questID) or InLog(questID))
 end
 
 -- Every prerequisite done. Finishing an alternative to one counts as doing it,
@@ -143,8 +179,9 @@ end
 local function GroupDone(list)
     for _, id in ipairs(list) do
         local done = IsCompleted(math.abs(id))
-        if not done and id > 0 then
-            for _, alt in ipairs(QuestDB.exclusiveTo(id) or {}) do
+        local alts = not done and id > 0 and Static(id).exclusive
+        if alts then
+            for _, alt in ipairs(alts) do
                 if IsCompleted(alt) then done = true break end
             end
         end
@@ -177,73 +214,76 @@ local function AnyTaken(list)
     return false
 end
 
-local player = {}
+local player = {}       -- level, and the bits that never change; read once per redraw
+local availableNow = {} -- questID -> IsAvailable's answer this redraw (a quest giver can have several spawns)
+local questNames, questNamesLevel = {}, nil -- questID -> QuestName's text, and the level it was coloured for
 
 local function RefreshPlayer()
     player.level = UnitLevel("player")
-    player.raceBit = bit.lshift(1, select(3, UnitRace("player")) - 1)
-    player.classBit = bit.lshift(1, select(3, UnitClass("player")) - 1)
+    if not player.raceBit then
+        player.raceBit = bit.lshift(1, select(3, UnitRace("player")) - 1)
+        player.classBit = bit.lshift(1, select(3, UnitClass("player")) - 1)
+        player.class = select(2, UnitClass("player"))
+    end
     player.grayBelow = player.level - (GetQuestGreenRange and GetQuestGreenRange() or 8)
+    if questNamesLevel ~= player.level then
+        wipe(questNames)
+        questNamesLevel = player.level
+    end
 end
 
-local function IsAvailable(questID)
+local function CheckAvailable(questID)
     if IsCompleted(questID) or InLog(questID) then return false end
-    if (QuestDB.requiredLevel(questID) or 0) > player.level then return false end
-    local maxLevel = QuestDB.requiredMaxLevel(questID)
-    if maxLevel and maxLevel > 0 and player.level > maxLevel then return false end
-    -- Gray quests give nothing worth the walk.
-    local questLevel = QuestDB.questLevel(questID)
-    if questLevel and questLevel > 0 and questLevel < player.grayBelow then return false end
-    -- Red quests: allowed to pick up, but not something to walk to yet.
-    if questLevel and questLevel > player.level + db.maxAbove then return false end
+    local s = Static(questID)
+    if s.requiredLevel > player.level then return false end
+    if s.maxLevel and player.level > s.maxLevel then return false end
+    -- Gray quests give nothing worth the walk; red ones are allowed, but not
+    -- something to walk to yet.
+    if s.level and (s.level < player.grayBelow or s.level > player.level + db.maxAbove) then return false end
     local holiday = holidaySortOf[questID]
     if holiday and not (db.holidays and activeHolidays[holiday]) then return false end
-    local races = QuestDB.requiredRaces(questID)
-    if races and races > 0 and bit.band(races, player.raceBit) == 0 then return false end
-    local classes = QuestDB.requiredClasses(questID)
-    if classes and classes > 0 and bit.band(classes, player.classBit) == 0 then return false end
+    if s.races and bit.band(s.races, player.raceBit) == 0 then return false end
+    if s.classes and bit.band(s.classes, player.classBit) == 0 then return false end
     -- Profession quests: skill levels aren't checked, so leave them out rather than guess.
-    if QuestDB.requiredSkill(questID) then return false end
-    local single = QuestDB.preQuestSingle(questID)
-    if single and #single > 0 then
-        if not AnyCompleted(single) then return false end
-    else
-        local group = QuestDB.preQuestGroup(questID)
-        if group and #group > 0 and not GroupDone(group) then return false end
+    if s.skill then return false end
+    if s.single then
+        if not AnyCompleted(s.single) then return false end
+    elseif s.group and not GroupDone(s.group) then
+        return false
     end
     -- Done or in the log: a sibling that rules this one out, the next quest in the chain,
     -- or the quest a breadcrumb leads to. The game often skips flagging the earlier one.
-    local exclusive = QuestDB.exclusiveTo(questID)
-    if exclusive and AnyTaken(exclusive) then return false end
-    if Taken(QuestDB.nextQuestInChain(questID)) then return false end
-    if Taken(QuestDB.breadcrumbForQuestId(questID)) then return false end
-    for _, id in ipairs(QuestDB.breadcrumbs(questID) or {}) do
-        if InLog(id) then return false end
+    if s.exclusive and AnyTaken(s.exclusive) then return false end
+    if Taken(s.next) or Taken(s.breadcrumbFor) then return false end
+    if s.breadcrumbs then
+        for _, id in ipairs(s.breadcrumbs) do
+            if InLog(id) then return false end
+        end
     end
-    local parent = QuestDB.parentQuest(questID)
-    if parent and parent ~= 0 and not InLog(parent) then return false end
-    local disabledBy = QuestDB.disabledByQuest(questID)
-    if disabledBy and disabledBy ~= 0 and InLog(disabledBy) then return false end
-    local untilDone = QuestDB.availableUntilCompleted(questID)
-    if untilDone and untilDone ~= 0 and IsCompleted(untilDone) then return false end
-    local startingWith = QuestDB.availableStartingWith(questID)
-    if startingWith and startingWith ~= 0 and not Taken(startingWith) then return false end
-    local minRep = QuestDB.requiredMinRep(questID)
-    if minRep and (Reputation(minRep[1]) or -math.huge) < minRep[2] then return false end
-    local maxRep = QuestDB.requiredMaxRep(questID)
-    if maxRep and (Reputation(maxRep[1]) or -math.huge) >= maxRep[2] then return false end
+    if s.parent and not InLog(s.parent) then return false end
+    if s.disabledBy and InLog(s.disabledBy) then return false end
+    if s.untilDone and IsCompleted(s.untilDone) then return false end
+    if s.startingWith and not Taken(s.startingWith) then return false end
+    if s.minRep and (Reputation(s.minRep[1]) or -math.huge) < s.minRep[2] then return false end
+    if s.maxRep and (Reputation(s.maxRep[1]) or -math.huge) >= s.maxRep[2] then return false end
     -- Positive: a spell the player must know; negative: one they must not.
-    local spell = QuestDB.requiredSpell(questID)
-    if spell and spell ~= 0 and C_SpellBook and C_SpellBook.IsSpellKnown
-        and (C_SpellBook.IsSpellKnown(math.abs(spell)) == (spell < 0)) then
+    if s.spell and C_SpellBook and C_SpellBook.IsSpellKnown
+        and (C_SpellBook.IsSpellKnown(math.abs(s.spell)) == (s.spell < 0)) then
         return false
     end
     return true
 end
 
----------------------------------------------------------------------------
--- Map pins
----------------------------------------------------------------------------
+-- Once per quest per redraw: a quest giver with several spawns asks about the same quests at each.
+local function IsAvailable(questID)
+    local available = availableNow[questID]
+    if available == nil then
+        available = CheckAvailable(questID)
+        availableNow[questID] = available
+    end
+    return available
+end
+
 ---------------------------------------------------------------------------
 -- Townsfolk: friendly NPCs by the service they offer, from QuestieDB's NPC flags.
 ---------------------------------------------------------------------------
@@ -355,44 +395,52 @@ local function AnyTownsfolk()
     return false
 end
 
--- Background build, a few seconds after login: at most BUDGET ms a frame, so the
--- first map opening needn't build them. A map opened before it's done finishes it
--- at once (FinishBackground), so its pins are never partial.
+---------------------------------------------------------------------------
+-- Background build: each index takes tens of milliseconds, run at most BUDGET
+-- ms a frame from 3 s after login, or when a townsfolk type is first ticked. A
+-- map open while one builds gets its pins when it is done.
+---------------------------------------------------------------------------
 local BUDGET = 4
-local background
+local jobs = {}   -- waiting or running, in order: { name = "quests" | "towns", run = coroutine }
+local failed = {} -- name -> true after an error, so it isn't retried on every redraw
 local builder = CreateFrame("Frame")
 builder:Hide()
 
-local function Step()
-    local ok, err = coroutine.resume(background)
-    if not ok or coroutine.status(background) == "dead" then
-        background = nil
-        builder:Hide()
-        if not ok then error(err, 0) end
-    end
-end
-
 builder:SetScript("OnUpdate", function()
     local stop = debugprofilestop() + BUDGET
-    while background and debugprofilestop() < stop do Step() end
+    while jobs[1] and debugprofilestop() < stop do
+        local job = jobs[1]
+        local start = debugprofilestop()
+        local ok, err = coroutine.resume(job.run)
+        perf[job.name] = perf[job.name] + debugprofilestop() - start
+        if not ok or coroutine.status(job.run) == "dead" then
+            table.remove(jobs, 1)
+            if not ok then
+                failed[job.name] = true
+                error(err, 0)
+            end
+            RequestRedraw()
+        end
+    end
+    if not jobs[1] then builder:Hide() end
 end)
 
-local function FinishBackground()
-    while background do Step() end
-end
-
 local function StartBackground()
-    if background then return end
-    local towns = AnyTownsfolk() and not townsReady
-    if questReady and not towns then return end
-    background = coroutine.create(function()
-        if not questReady then BuildIndex() end
-        if towns then BuildTownsIndex() end
-    end)
-    perf.background = true
-    builder:Show()
+    local function Queue(name, ready, build)
+        if ready or failed[name] then return end
+        for _, job in ipairs(jobs) do
+            if job.name == name then return end
+        end
+        jobs[#jobs + 1] = { name = name, run = coroutine.create(build) }
+    end
+    Queue("quests", questReady, BuildIndex)
+    if AnyTownsfolk() then Queue("towns", townsReady, BuildTownsIndex) end
+    if jobs[1] then builder:Show() end
 end
 
+---------------------------------------------------------------------------
+-- Map pins
+---------------------------------------------------------------------------
 local PIN = "BetterQuestPinsPinTemplate"
 local MAX_LINES = 10
 
@@ -464,17 +512,53 @@ function DataProvider:RemoveAllData()
 end
 
 local function QuestName(questID)
-    local level = QuestDB.questLevel(questID)
+    local text = questNames[questID]
+    if text then return text end
     local name = QuestDB.name(questID) or ("Quest " .. questID)
-    if not level or level <= 0 then return name end
-    local color = GetQuestDifficultyColor(level)
-    return ("|cff%02x%02x%02x[%d]|r %s"):format(color.r * 255, color.g * 255, color.b * 255, level, name)
+    local level = Static(questID).level
+    if level then
+        local color = GetQuestDifficultyColor(level)
+        text = ("|cff%02x%02x%02x[%d]|r %s"):format(color.r * 255, color.g * 255, color.b * 255, level, name)
+    else
+        text = name
+    end
+    questNames[questID] = text
+    return text
 end
 
 -- Many townsfolk also give quests, and their quest pin would cover them. A
 -- townsfolk pin on a quest pin moves a little down and right and shrinks, so
--- both show; the shared tooltip still lists both.
+-- both show; the shared tooltip still lists both. The quest pins drawn go into
+-- a grid of NEAR-sized cells (x, y pairs, flat), so a townsfolk pin looks at
+-- nine cells rather than at every quest pin.
 local NEAR, NUDGE = 0.005, 0.007
+local CELLS = 4096 -- cells per row of the grid key; a map and its neighbours span far fewer
+
+local function MarkQuestPin(grid, x, y)
+    local key = math.floor(x / NEAR) * CELLS + math.floor(y / NEAR)
+    local cell = grid[key]
+    if not cell then
+        cell = {}
+        grid[key] = cell
+    end
+    cell[#cell + 1] = x
+    cell[#cell + 1] = y
+end
+
+local function NearQuestPin(grid, x, y)
+    local cx, cy = math.floor(x / NEAR), math.floor(y / NEAR)
+    for i = cx - 1, cx + 1 do
+        for j = cy - 1, cy + 1 do
+            local cell = grid[i * CELLS + j]
+            if cell then
+                for k = 1, #cell, 2 do
+                    if math.abs(cell[k] - x) < NEAR and math.abs(cell[k + 1] - y) < NEAR then return true end
+                end
+            end
+        end
+    end
+    return false
+end
 
 ---------------------------------------------------------------------------
 -- OpenMap: its stitched map shows the zones around the one underneath, but only
@@ -514,10 +598,13 @@ local function ForNeighbours(host, maps, fn)
     end
 end
 
--- Skill line IDs of the professions and secondary skills the character has,
--- or nil when this client cannot say (then nothing is filtered).
-local function KnownSkills()
-    if not GetProfessions then return nil end
+-- Skill line IDs of the professions and secondary skills the character has:
+-- read when first needed and again after SKILL_LINES_CHANGED; false when this
+-- client cannot say (then nothing is filtered).
+local knownSkills
+
+local function ReadKnownSkills()
+    if not GetProfessions then return false end
     local known = {}
     for _, index in pairs({ GetProfessions() }) do
         local skillLine = select(7, GetProfessionInfo(index))
@@ -526,29 +613,24 @@ local function KnownSkills()
     return known
 end
 
-local function AddTownsfolkPins(map, mapID, size, questSpots)
+local function AddTownsfolkPins(map, mapID, size, questPins)
     if not AnyTownsfolk() then return end
-    FinishBackground()
     if not townsReady then
-        local start = debugprofilestop()
-        BuildTownsIndex()
-        perf.towns = debugprofilestop() - start
+        StartBackground() -- the pins follow when the index is done
+        return
     end
-    local _, playerClass = UnitClass("player")
-    local known = db.tfOnlyMine and KnownSkills()
+    if db.tfOnlyMine and knownSkills == nil then knownSkills = ReadKnownSkills() end
+    local known = db.tfOnlyMine and knownSkills or nil
     local function Draw(list, toHost)
         for _, npc in ipairs(list) do
             -- A trainer Questie's lists don't know stays visible: better too many than missing.
             local wanted = npc.type.trainer ~= "profession" or not known or not npc.profession
                 or known[npc.profession]
-            if db[npc.type.key] and wanted and (npc.type.trainer ~= "class" or npc.class == playerClass) then
+            if db[npc.type.key] and wanted and (npc.type.trainer ~= "class" or npc.class == player.class) then
                 local x, y, pinSize = npc.x, npc.y, size
                 if toHost then x, y = toHost(x, y) end
-                for _, q in ipairs(questSpots) do
-                    if math.abs(q.x - x) < NEAR and math.abs(q.y - y) < NEAR then
-                        x, y, pinSize = x + NUDGE, y + NUDGE, size * 0.75
-                        break
-                    end
+                if NearQuestPin(questPins, x, y) then
+                    x, y, pinSize = x + NUDGE, y + NUDGE, size * 0.75
                 end
                 local pin = map:AcquirePin(PIN, { npc = npc })
                 pin:SetPosition(x, y)
@@ -578,22 +660,21 @@ function DataProvider:DrawAll()
         or info.mapType == Enum.UIMapType.Cosmic then
         return
     end
+    RefreshPlayer()
+    wipe(availableNow)
     local size = db.smallPins and 16 or 22
-    local questSpots = self:AddQuestPins(mapID, size)
-    AddTownsfolkPins(self:GetMap(), mapID, size, questSpots)
+    local questPins = self:AddQuestPins(mapID, size)
+    AddTownsfolkPins(self:GetMap(), mapID, size, questPins)
 end
 
--- Returns the spots that got a quest pin, so townsfolk can step aside.
+-- Returns the grid of quest pins drawn (MarkQuestPin), so townsfolk can step aside.
 function DataProvider:AddQuestPins(mapID, size)
-    local placed = {}
-    if not db.showPins then return placed end
-    FinishBackground()
+    local grid = {}
+    if not db.showPins then return grid end
     if not questReady then
-        local start = debugprofilestop()
-        BuildIndex()
-        perf.quests = debugprofilestop() - start
+        StartBackground() -- the pins follow when the index is done
+        return grid
     end
-    RefreshPlayer()
     if db.holidays and holidayDay ~= C_DateAndTime.GetCurrentCalendarTime().monthDay then ReadHolidays() end
     local map = self:GetMap()
     local function Draw(spots, toHost)
@@ -612,17 +693,26 @@ function DataProvider:AddQuestPins(mapID, size)
                 pin:SetPosition(x, y)
                 pin:SetSize(size, size)
                 pin:Show()
-                placed[#placed + 1] = { x = x, y = y }
+                MarkQuestPin(grid, x, y)
             end
         end
     end
     if byMap[mapID] then Draw(byMap[mapID]) end
     ForNeighbours(mapID, byMap, function(other, toHost) Draw(byMap[other], toHost) end)
-    return placed
+    return grid
 end
 
-local function RefreshIfOpen()
+-- One redraw a frame, however many events ask, and none while the map is closed:
+-- opening it redraws anyway.
+local redrawPending = false
+local function Redraw()
+    redrawPending = false
     if WorldMapFrame:IsShown() then DataProvider:RefreshAllData() end
+end
+function RequestRedraw()
+    if redrawPending or not WorldMapFrame:IsShown() then return end
+    redrawPending = true
+    C_Timer.After(0, Redraw)
 end
 
 ---------------------------------------------------------------------------
@@ -635,7 +725,8 @@ local function RegisterSettings()
         local setting = Settings.RegisterProxySetting(category, "BQP_" .. key, Settings.VarType.Boolean, name,
             DEFAULTS[key], function() return db[key] end, function(value)
                 db[key] = value
-                RefreshIfOpen()
+                StartBackground() -- a townsfolk type ticked with the map closed builds its index now
+                RequestRedraw()
             end)
         Settings.CreateCheckbox(category, setting, tooltip)
     end
@@ -644,7 +735,7 @@ local function RegisterSettings()
     local above = Settings.RegisterProxySetting(category, "BQP_maxAbove", Settings.VarType.Number,
         "Levels above you", DEFAULTS.maxAbove, function() return db.maxAbove end, function(value)
             db.maxAbove = value
-            RefreshIfOpen()
+            RequestRedraw()
         end)
     local options = Settings.CreateSliderOptions(0, 10, 1)
     options:SetLabelFormatter(MinimalSliderWithSteppersMixin.Label.Right, function(value)
@@ -676,56 +767,57 @@ SlashCmdList.BETTERQUESTPINS = function(msg)
         Settings.OpenToCategory(townsCategory:GetID())
     elseif cmd == "pins" then
         db.showPins = not db.showPins
-        RefreshIfOpen()
+        RequestRedraw()
         Print("quest pins " .. (db.showPins and "on" or "off"))
     elseif cmd == "why" and tonumber(arg) then
         ExplainNpc(tonumber(arg))
     elseif cmd == "perf" then
         local pins = 0
         for _ in WorldMapFrame:EnumeratePinsByTemplate(PIN) do pins = pins + 1 end
-        Print(("map redraw: last %.1f ms, slowest %.1f ms, %d redraws, %d pins on the map now"):format(
-            perf.last, perf.slowest, perf.count, pins))
-        if perf.quests == 0 and perf.towns == 0 and perf.background then
-            Print(("one-time index: built in the background after login%s"):format(background and " (still running)" or ""))
-        else
-            Print(("one-time index: quests %.1f ms, townsfolk %.1f ms"):format(perf.quests, perf.towns))
-        end
+        UpdateAddOnMemoryUsage()
+        Print(("memory %.1f KB, %d pins on the map now"):format(GetAddOnMemoryUsage(ADDON), pins))
+        Print(("map redraw: last %.1f ms, slowest %.1f ms, %d redraws"):format(perf.last, perf.slowest, perf.count))
+        Print(("index, built in the background: quests %.1f ms, townsfolk %.1f ms%s"):format(
+            perf.quests, perf.towns, jobs[1] and " (still building)" or ""))
     else
         Print("commands:")
         print("  /bqp - open settings")
         print("  /bqp town - open the townsfolk settings")
         print("  /bqp pins - turn quest pins on or off")
         print("  /bqp why <npcID> - explain why an NPC has a townsfolk pin or not")
-        print("  /bqp perf - how long the map redraws take")
+        print("  /bqp perf - memory, and how long the map redraws take")
     end
 end
 
 WorldMapFrame:AddDataProvider(DataProvider)
 
--- Quest log changes alter what is available; redraw only while the map is open.
+-- Quest log, level, skill, reputation and spell changes alter what is available
+-- and which trainers are yours; they redraw the map while it is open.
 local events = CreateFrame("Frame")
 events:RegisterEvent("ADDON_LOADED")
 events:SetScript("OnEvent", function(self, event, name)
-    if event == "CALENDAR_UPDATE_EVENT_LIST" then
-        ReadHolidays()
-        return RefreshIfOpen()
+    if event == "ADDON_LOADED" then
+        if name ~= ADDON then return end
+        self:UnregisterEvent("ADDON_LOADED")
+        BetterQuestPinsDB = BetterQuestPinsDB or {}
+        db = BetterQuestPinsDB
+        for k, v in pairs(DEFAULTS) do
+            if db[k] == nil then db[k] = v end
+        end
+        RegisterSettings()
+        C_Timer.After(3, StartBackground)
+        -- Calendar data loads after a request; CALENDAR_UPDATE_EVENT_LIST says it arrived.
+        if C_Calendar and C_Calendar.OpenCalendar then
+            self:RegisterEvent("CALENDAR_UPDATE_EVENT_LIST")
+            C_Calendar.OpenCalendar()
+        end
+        for _, e in ipairs({ "QUEST_ACCEPTED", "QUEST_TURNED_IN", "QUEST_REMOVED", "PLAYER_LEVEL_UP",
+            "SKILL_LINES_CHANGED", "UPDATE_FACTION", "SPELLS_CHANGED" }) do
+            self:RegisterEvent(e)
+        end
+        return
     end
-    if event ~= "ADDON_LOADED" then return RefreshIfOpen() end
-    if name ~= ADDON then return end
-    self:UnregisterEvent("ADDON_LOADED")
-    BetterQuestPinsDB = BetterQuestPinsDB or {}
-    db = BetterQuestPinsDB
-    for k, v in pairs(DEFAULTS) do
-        if db[k] == nil then db[k] = v end
-    end
-    RegisterSettings()
-    C_Timer.After(3, StartBackground)
-    -- Calendar data loads after a request; CALENDAR_UPDATE_EVENT_LIST says it arrived.
-    if C_Calendar and C_Calendar.OpenCalendar then
-        self:RegisterEvent("CALENDAR_UPDATE_EVENT_LIST")
-        C_Calendar.OpenCalendar()
-    end
-    for _, e in ipairs({ "QUEST_ACCEPTED", "QUEST_TURNED_IN", "QUEST_REMOVED", "PLAYER_LEVEL_UP", "SKILL_LINES_CHANGED" }) do
-        self:RegisterEvent(e)
-    end
+    if event == "CALENDAR_UPDATE_EVENT_LIST" then ReadHolidays() end
+    if event == "SKILL_LINES_CHANGED" then knownSkills = nil end
+    RequestRedraw()
 end)
