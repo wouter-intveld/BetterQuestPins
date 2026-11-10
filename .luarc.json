@@ -39,6 +39,8 @@
     "AVAILABLE_QUEST",
     "AVAILABLE_QUESTS",
     "GetQuestGreenRange",
-    "GetFactionInfoByID"
+    "GetFactionInfoByID",
+    "LOCALIZED_CLASS_NAMES_MALE",
+    "LOCALIZED_CLASS_NAMES_FEMALE"
   ]
 }

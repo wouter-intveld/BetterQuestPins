@@ -10,6 +10,9 @@ World of Warcraft Forever client.
 - Holiday quests are off by default. Turn them on and only the holidays
   running today, read from the in-game calendar, get pins. World event
   quests are left out.
+- Optional townsfolk pins, each type off until ticked: flight masters,
+  innkeepers, repair, class trainers (your class only), profession trainers,
+  bankers and stable masters. Only NPCs friendly to your faction.
 - Hover a pin to list its quests, coloured by difficulty. Click it to set a
   map waypoint.
 - Pins update when you accept, turn in or abandon a quest, or level up.

@@ -4,7 +4,12 @@
 
 local ADDON, ns = ...
 local BRAND = "|cffcda552Better|rQuestPins"
-local DEFAULTS = { showPins = true, smallPins = false, maxAbove = 4, holidays = false }
+local DEFAULTS = {
+    showPins = true, smallPins = false, maxAbove = 4, holidays = false,
+    -- Townsfolk, each type off until ticked.
+    tfFlight = false, tfInn = false, tfRepair = false, tfClass = false,
+    tfProfession = false, tfBanker = false, tfStable = false,
+}
 local db
 
 local ZoneDB = LibQuestieDB.Support.Get("ZoneDB")
@@ -225,6 +230,120 @@ end
 ---------------------------------------------------------------------------
 -- Map pins
 ---------------------------------------------------------------------------
+---------------------------------------------------------------------------
+-- Townsfolk: friendly NPCs by the service they offer, from QuestieDB's NPC flags.
+---------------------------------------------------------------------------
+local FLAGS = LibQuestieDB.Enum.npcFlags
+local TRACKING = "Interface\\Minimap\\Tracking\\"
+local TOWNSFOLK = {
+    { key = "tfFlight", flag = FLAGS.FLIGHT_MASTER, icon = "FlightMaster", name = "Flight masters" },
+    { key = "tfInn", flag = FLAGS.INNKEEPER, icon = "Innkeeper", name = "Innkeepers" },
+    { key = "tfRepair", flag = FLAGS.REPAIR, icon = "Repair", name = "Repair" },
+    { key = "tfClass", flag = FLAGS.TRAINER, icon = "Class", name = "Class trainers", trainer = "class" },
+    { key = "tfProfession", flag = FLAGS.TRAINER, icon = "Profession", name = "Profession trainers", trainer = "profession" },
+    { key = "tfBanker", flag = FLAGS.BANKER, icon = "Banker", name = "Bankers" },
+    { key = "tfStable", flag = FLAGS.STABLEMASTER, icon = "StableMaster", name = "Stable masters" },
+}
+
+-- Trainers share one flag; the subname ("Mage Trainer") tells class from
+-- profession. The class names are the client's own, so this works in any language.
+local function TrainerClass(sub)
+    if not sub then return nil end
+    for token, name in pairs(LOCALIZED_CLASS_NAMES_MALE) do
+        local female = LOCALIZED_CLASS_NAMES_FEMALE[token]
+        if sub:find(name, 1, true) or (female and sub:find(female, 1, true)) then return token end
+    end
+end
+
+-- uiMapID -> list of { x, y, type, name, sub, class }, friendly NPCs only.
+-- Built once, the first time a townsfolk type is ticked: a pass over every NPC.
+local townsByMap
+
+local function BuildTownsIndex()
+    townsByMap = {}
+    local faction = UnitFactionGroup("player") == "Alliance" and "A" or "H"
+    for _, npcID in ipairs(NpcDB.GetAllIds()) do
+        local flags = NpcDB.npcFlags(npcID) or 0
+        local types
+        for _, t in ipairs(TOWNSFOLK) do
+            if t.flag and bit.band(flags, t.flag) ~= 0 then
+                types = types or {}
+                types[#types + 1] = t
+            end
+        end
+        local friendly = types and (NpcDB.friendlyToFaction(npcID) or ""):find(faction, 1, true)
+        local spawns = friendly and NpcDB.spawns(npcID)
+        if spawns then
+            local name, sub = NpcDB.name(npcID) or "?", NpcDB.subName(npcID)
+            local class = TrainerClass(sub)
+            for _, t in ipairs(types) do
+                if not t.trainer or (t.trainer == "class") == (class ~= nil) then
+                    for areaID, coords in pairs(spawns) do
+                        local mapID = areaToMap[areaID]
+                        if mapID and mapID > 0 then
+                            local list = townsByMap[mapID] or {}
+                            townsByMap[mapID] = list
+                            for _, c in ipairs(coords) do
+                                if c[1] and c[2] and c[1] >= 0 and c[2] >= 0 then
+                                    list[#list + 1] = { x = c[1] / 100, y = c[2] / 100, type = t,
+                                        name = name, sub = sub, class = class }
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- /bqp why <npcID>: walks one NPC through the steps BuildTownsIndex takes.
+local function ExplainNpc(npcID)
+    local flags = NpcDB.npcFlags(npcID) or 0
+    local sub = NpcDB.subName(npcID)
+    print(("%s <%s> flags %d, friendly %s, trainer class %s"):format(NpcDB.name(npcID) or "?", sub or "",
+        flags, tostring(NpcDB.friendlyToFaction(npcID)), tostring((TrainerClass(sub)))))
+    for _, t in ipairs(TOWNSFOLK) do
+        if t.flag and bit.band(flags, t.flag) ~= 0 then
+            print(("  matches %s, ticked %s"):format(t.name, tostring(db[t.key])))
+        end
+    end
+    for areaID in pairs(NpcDB.spawns(npcID) or {}) do
+        local mapID = areaToMap[areaID]
+        local found = 0
+        for _, npc in ipairs(townsByMap and townsByMap[mapID or 0] or {}) do
+            if npc.name == NpcDB.name(npcID) then
+                found = found + 1
+                print(("  entry: %s (%s, ticked %s), class %s, at %.3f %.3f"):format(npc.type.name, npc.type.key,
+                    tostring(db[npc.type.key]), tostring(npc.class), npc.x, npc.y))
+            end
+        end
+        if WorldMapFrame:IsShown() then
+            local pins = 0
+            for pin in WorldMapFrame:EnumeratePinsByTemplate("BetterQuestPinsPinTemplate") do
+                if pin.info and pin.info.npc and pin.info.npc.name == NpcDB.name(npcID) then pins = pins + 1 end
+            end
+            print(("  open map %d, pins for this NPC: %d"):format(WorldMapFrame:GetMapID() or 0, pins))
+        end
+        print(("  area %d -> map %s, in index %d time(s)%s"):format(areaID, tostring(mapID), found,
+            townsByMap and "" or " (index not built yet)"))
+    end
+end
+
+SLASH_BETTERQUESTPINS1 = "/bqp"
+SlashCmdList.BETTERQUESTPINS = function(msg)
+    local id = tonumber((msg or ""):match("^why%s+(%d+)"))
+    if id then return ExplainNpc(id) end
+    print("/bqp why <npcID> - explain why an NPC has a townsfolk pin or not")
+end
+
+local function AnyTownsfolk()
+    for _, t in ipairs(TOWNSFOLK) do
+        if db[t.key] then return true end
+    end
+    return false
+end
+
 local PIN = "BetterQuestPinsPinTemplate"
 local MAX_LINES = 10
 
@@ -235,24 +354,40 @@ function BetterQuestPinsPinMixin:OnLoad()
     self:UseFrameLevelType("PIN_FRAME_LEVEL_QUEST_PING")
 end
 
-function BetterQuestPinsPinMixin:OnAcquired(names)
-    self.names = names
+-- info: { quests = { name, ... } } for a quest giver, or { npc = spot } for townsfolk.
+function BetterQuestPinsPinMixin:OnAcquired(info)
+    self.info = info
+    if info.npc then
+        self.Texture:SetTexture(TRACKING .. info.npc.type.icon)
+    else
+        self.Texture:SetAtlas("QuestNormal")
+    end
 end
 
--- Lists every quest under the cursor, since pins at one spot overlap.
+-- Lists everything under the cursor, since pins at one spot overlap.
 function BetterQuestPinsPinMixin:OnMouseEnter()
-    local names = {}
+    local names, npcs = {}, {}
     for pin in self:GetMap():EnumeratePinsByTemplate(PIN) do
         if pin:IsMouseOver() then
-            for _, name in ipairs(pin.names) do names[#names + 1] = name end
+            if pin.info.npc then
+                npcs[#npcs + 1] = pin.info.npc
+            else
+                for _, name in ipairs(pin.info.quests) do names[#names + 1] = name end
+            end
         end
     end
     local tooltip = GameTooltip
     tooltip:SetOwner(self, "ANCHOR_LEFT")
-    tooltip:AddLine(#names == 1 and AVAILABLE_QUEST or AVAILABLE_QUESTS, 1, 1, 1, true)
-    for i = 1, math.min(#names, MAX_LINES) do tooltip:AddLine(names[i]) end
-    if #names > MAX_LINES then
-        tooltip:AddLine(("+%d more"):format(#names - MAX_LINES), 0.6, 0.6, 0.6)
+    if #names > 0 then
+        tooltip:AddLine(#names == 1 and AVAILABLE_QUEST or AVAILABLE_QUESTS, 1, 1, 1, true)
+        for i = 1, math.min(#names, MAX_LINES) do tooltip:AddLine(names[i]) end
+        if #names > MAX_LINES then
+            tooltip:AddLine(("+%d more"):format(#names - MAX_LINES), 0.6, 0.6, 0.6)
+        end
+    end
+    for _, npc in ipairs(npcs) do
+        tooltip:AddLine(npc.name, 1, 1, 1)
+        tooltip:AddLine(npc.sub or npc.type.name, 0.6, 0.6, 0.6)
     end
     tooltip:Show()
 end
@@ -287,21 +422,55 @@ local function QuestName(questID)
     return ("|cff%02x%02x%02x[%d]|r %s"):format(color.r * 255, color.g * 255, color.b * 255, level, name)
 end
 
+-- Many townsfolk also give quests, and their quest pin would cover them. A
+-- townsfolk pin on a quest pin moves a little down and right and shrinks, so
+-- both show; the shared tooltip still lists both.
+local NEAR, NUDGE = 0.005, 0.007
+
+local function AddTownsfolkPins(map, mapID, size, questSpots)
+    if not AnyTownsfolk() then return end
+    if not townsByMap then BuildTownsIndex() end
+    local _, playerClass = UnitClass("player")
+    for _, npc in ipairs(townsByMap[mapID] or {}) do
+        if db[npc.type.key] and (npc.type.trainer ~= "class" or npc.class == playerClass) then
+            local x, y, pinSize = npc.x, npc.y, size
+            for _, q in ipairs(questSpots) do
+                if math.abs(q.x - x) < NEAR and math.abs(q.y - y) < NEAR then
+                    x, y, pinSize = x + NUDGE, y + NUDGE, size * 0.75
+                    break
+                end
+            end
+            local pin = map:AcquirePin(PIN, { npc = npc })
+            pin:SetPosition(x, y)
+            pin:SetSize(pinSize, pinSize)
+            pin:Show()
+        end
+    end
+end
+
 function DataProvider:RefreshAllData()
     self:RemoveAllData()
-    if not (db and db.showPins) then return end
+    if not db then return end
     local mapID = self:GetMap():GetMapID()
     local info = mapID and C_Map.GetMapInfo(mapID)
     if not info or info.mapType == Enum.UIMapType.Continent or info.mapType == Enum.UIMapType.World
         or info.mapType == Enum.UIMapType.Cosmic then
         return
     end
+    local size = db.smallPins and 16 or 22
+    local questSpots = self:AddQuestPins(mapID, size)
+    AddTownsfolkPins(self:GetMap(), mapID, size, questSpots)
+end
+
+-- Returns the spots that got a quest pin, so townsfolk can step aside.
+function DataProvider:AddQuestPins(mapID, size)
+    local placed = {}
+    if not db.showPins then return placed end
     if not byMap then BuildIndex() end
     local spots = byMap[mapID]
-    if not spots then return end
+    if not spots then return placed end
     RefreshPlayer()
     if db.holidays and holidayDay ~= C_DateAndTime.GetCurrentCalendarTime().monthDay then ReadHolidays() end
-    local size = db.smallPins and 16 or 22
     for _, spot in pairs(spots) do
         local names
         for _, questID in ipairs(spot.quests) do
@@ -311,12 +480,14 @@ function DataProvider:RefreshAllData()
             end
         end
         if names then
-            local pin = self:GetMap():AcquirePin(PIN, names)
+            local pin = self:GetMap():AcquirePin(PIN, { quests = names })
             pin:SetPosition(spot.x, spot.y)
             pin:SetSize(size, size)
             pin:Show()
+            placed[#placed + 1] = spot
         end
     end
+    return placed
 end
 
 local function RefreshIfOpen()
@@ -327,7 +498,8 @@ end
 -- Settings panel (Options > AddOns)
 ---------------------------------------------------------------------------
 local function RegisterSettings()
-    local category = Settings.RegisterVerticalLayoutCategory(BRAND)
+    local main = Settings.RegisterVerticalLayoutCategory(BRAND)
+    local category = main -- the page the helper adds to; switched for the subpage
     local function Checkbox(key, name, tooltip)
         local setting = Settings.RegisterProxySetting(category, "BQP_" .. key, Settings.VarType.Boolean, name,
             DEFAULTS[key], function() return db[key] end, function(value)
@@ -349,7 +521,12 @@ local function RegisterSettings()
     end)
     Settings.CreateSlider(category, above, options, "Hide quests more than this many levels above you.")
     Checkbox("holidays", "Holiday quests", "Also pin quests of a holiday that is running today, like the Darkmoon Faire or Hallow's End.")
-    Settings.RegisterAddOnCategory(category)
+
+    category = Settings.RegisterVerticalLayoutSubcategory(main, "Townsfolk")
+    for _, t in ipairs(TOWNSFOLK) do
+        Checkbox(t.key, t.name, ("Pin friendly %s on the world map."):format(t.name:lower()))
+    end
+    Settings.RegisterAddOnCategory(main)
 end
 
 WorldMapFrame:AddDataProvider(DataProvider)
