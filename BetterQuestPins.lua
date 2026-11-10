@@ -458,7 +458,12 @@ local MAX_LINES = 10
 
 BetterQuestPinsPinMixin = CreateFromMixins(MapCanvasPinMixin)
 
+-- Pin frames the map has made from the template: it keeps every one for reuse, and
+-- each carries a copy of the pin mixin's methods, so they are most of the memory in use.
+local pinFrames = 0
+
 function BetterQuestPinsPinMixin:OnLoad()
+    pinFrames = pinFrames + 1
     self:SetScalingLimits(1, 1.0, 1.2)
     self:UseFrameLevelType("PIN_FRAME_LEVEL_QUEST_PING")
 end
@@ -785,18 +790,15 @@ SlashCmdList.BETTERQUESTPINS = function(msg)
     elseif cmd == "why" and tonumber(arg) then
         ExplainNpc(tonumber(arg))
     elseif cmd == "perf" then
-        local pins, spare, spots, spawns = 0, 0, 0, 0
+        local pins, spots, spawns = 0, 0, 0
         for _ in WorldMapFrame:EnumeratePinsByTemplate(PIN) do pins = pins + 1 end
-        -- The map keeps every pin it ever needed at once; each holds a copy of the pin mixin.
-        local pool = WorldMapFrame.pinPools and WorldMapFrame.pinPools[PIN]
-        if pool then for _ in pool:EnumerateInactive() do spare = spare + 1 end end
         for _, list in pairs(byMap or {}) do spots = spots + #list end
         for _, list in pairs(townsByMap or {}) do spawns = spawns + #list end
         collectgarbage("collect") -- what is held, not what is waiting to be freed
         UpdateAddOnMemoryUsage()
         Print(("memory %.1f KB after a collection; %d quest spots and %d townsfolk spawns indexed"):format(
             GetAddOnMemoryUsage(ADDON), spots, spawns))
-        Print(("pins: %d on the map now, %d more kept by the map for reuse"):format(pins, spare))
+        Print(("pins: %d on the map now, %d more kept by the map for reuse"):format(pins, math.max(0, pinFrames - pins)))
         Print(("map redraw: last %.1f ms, slowest %.1f ms, %d redraws"):format(perf.last, perf.slowest, perf.count))
         Print(("index, built in the background: quests %.1f ms, townsfolk %.1f ms%s"):format(
             perf.quests, perf.towns, jobs[1] and " (still building)" or ""))
