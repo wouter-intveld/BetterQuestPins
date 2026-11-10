@@ -41,6 +41,7 @@
     "GetQuestGreenRange",
     "GetFactionInfoByID",
     "LOCALIZED_CLASS_NAMES_MALE",
-    "LOCALIZED_CLASS_NAMES_FEMALE"
+    "LOCALIZED_CLASS_NAMES_FEMALE",
+    "OpenMapAPI"
   ]
 }

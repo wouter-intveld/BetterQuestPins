@@ -21,6 +21,10 @@ World of Warcraft Forever client.
 Turn the pins off or make them smaller under Options > AddOns >
 BetterQuestPins.
 
+With [OpenMap](https://www.curseforge.com/wow/addons/openmap) and its stitched
+map, the pins of the zones around you show at once, before OpenMap switches the
+zone underneath. Without OpenMap nothing changes.
+
 ## Commands
 
 | Command | Action |
@@ -29,6 +33,7 @@ BetterQuestPins.
 | `/bqp town` | Open the townsfolk settings |
 | `/bqp pins` | Turn quest pins on or off |
 | `/bqp why <npcID>` | Explain why an NPC has a townsfolk pin or not |
+| `/bqp perf` | How long the map redraws take |
 
 ## Requirements
 

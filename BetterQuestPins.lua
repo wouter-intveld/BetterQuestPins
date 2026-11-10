@@ -13,6 +13,8 @@ local DEFAULTS = {
 }
 local db
 local mainCategory, townsCategory -- the settings pages, for /bqp
+-- /bqp perf: how long the map redraws and the one-time index builds take (ms)
+local perf = { last = 0, slowest = 0, count = 0, quests = 0, towns = 0 }
 
 local ZoneDB = LibQuestieDB.Support.Get("ZoneDB")
 
@@ -91,9 +93,18 @@ local function ReadHolidays()
     end
 end
 
+-- The indexes are built in the background after login (StartBackground): run
+-- there, a builder hands control back every so often, so no frame waits long.
+local YIELD_EVERY = 200
+local questReady, townsReady
+local function Pause(i)
+    if i % YIELD_EVERY == 0 and coroutine.running() then coroutine.yield() end
+end
+
 local function BuildIndex()
     byMap = {}
-    for _, questID in ipairs(QuestDB.GetAllIds()) do
+    for i, questID in ipairs(QuestDB.GetAllIds()) do
+        Pause(i)
         -- Unnamed entries are placeholders the database knows only by ID; blacklisted
         -- ones exist in the data but cannot be taken in game.
         local sort = QuestDB.zoneOrSort(questID) or 0
@@ -111,6 +122,7 @@ local function BuildIndex()
             end
         end
     end
+    questReady = true
 end
 
 ---------------------------------------------------------------------------
@@ -265,7 +277,8 @@ local townsByMap
 local function BuildTownsIndex()
     townsByMap = {}
     local faction = UnitFactionGroup("player") == "Alliance" and "A" or "H"
-    for _, npcID in ipairs(NpcDB.GetAllIds()) do
+    for i, npcID in ipairs(NpcDB.GetAllIds()) do
+        Pause(i)
         local flags = NpcDB.npcFlags(npcID) or 0
         local types
         for _, t in ipairs(TOWNSFOLK) do
@@ -299,6 +312,7 @@ local function BuildTownsIndex()
             end
         end
     end
+    townsReady = true
 end
 
 -- /bqp why <npcID>: walks one NPC through the steps BuildTownsIndex takes.
@@ -339,6 +353,44 @@ local function AnyTownsfolk()
         if db[t.key] then return true end
     end
     return false
+end
+
+-- Background build, a few seconds after login: at most BUDGET ms a frame, so the
+-- first map opening needn't build them. A map opened before it's done finishes it
+-- at once (FinishBackground), so its pins are never partial.
+local BUDGET = 4
+local background
+local builder = CreateFrame("Frame")
+builder:Hide()
+
+local function Step()
+    local ok, err = coroutine.resume(background)
+    if not ok or coroutine.status(background) == "dead" then
+        background = nil
+        builder:Hide()
+        if not ok then error(err, 0) end
+    end
+end
+
+builder:SetScript("OnUpdate", function()
+    local stop = debugprofilestop() + BUDGET
+    while background and debugprofilestop() < stop do Step() end
+end)
+
+local function FinishBackground()
+    while background do Step() end
+end
+
+local function StartBackground()
+    if background then return end
+    local towns = AnyTownsfolk() and not townsReady
+    if questReady and not towns then return end
+    background = coroutine.create(function()
+        if not questReady then BuildIndex() end
+        if towns then BuildTownsIndex() end
+    end)
+    perf.background = true
+    builder:Show()
 end
 
 local PIN = "BetterQuestPinsPinTemplate"
@@ -424,6 +476,44 @@ end
 -- both show; the shared tooltip still lists both.
 local NEAR, NUDGE = 0.005, 0.007
 
+---------------------------------------------------------------------------
+-- OpenMap: its stitched map shows the zones around the one underneath, but only
+-- switches that one once the view has rested, so pins tied to it came late. While
+-- OpenMap stitches, the zones near it are drawn on its canvas too, already there.
+---------------------------------------------------------------------------
+local REACH = 1                -- how far past the host map's edges, in host map widths
+local worldRects = {}          -- mapID -> { u, v, width, height } on OpenMap's world, or false
+
+local function WorldRect(mapID)
+    local r = worldRects[mapID]
+    if r == nil then
+        local u0, v0 = OpenMapAPI.WorldFromMap(mapID, 0, 0)
+        local u1, v1 = OpenMapAPI.WorldFromMap(mapID, 1, 1)
+        r = (u0 and u1 and u1 ~= u0 and v1 ~= v0) and { u0, v0, u1 - u0, v1 - v0 } or false
+        worldRects[mapID] = r
+    end
+    return r
+end
+
+-- fn(mapID, toHost) for each map of `maps` near the host, toHost(x, y) giving a point
+-- of that map on the host's canvas. Nothing without OpenMap, or while it isn't stitching.
+local function ForNeighbours(host, maps, fn)
+    local om = OpenMapAPI -- nil without OpenMap
+    if not (om and om.IsStitched and om.IsStitched()) then return end
+    local h = WorldRect(host)
+    if not h then return end
+    for mapID in pairs(maps) do
+        local r = mapID ~= host and WorldRect(mapID)
+        if r then
+            local ax, ay = (r[1] - h[1]) / h[3], (r[2] - h[2]) / h[4]
+            local sx, sy = r[3] / h[3], r[4] / h[4]
+            if ax + sx > -REACH and ax < 1 + REACH and ay + sy > -REACH and ay < 1 + REACH then
+                fn(mapID, function(x, y) return ax + x * sx, ay + y * sy end)
+            end
+        end
+    end
+end
+
 -- Skill line IDs of the professions and secondary skills the character has,
 -- or nil when this client cannot say (then nothing is filtered).
 local function KnownSkills()
@@ -438,30 +528,48 @@ end
 
 local function AddTownsfolkPins(map, mapID, size, questSpots)
     if not AnyTownsfolk() then return end
-    if not townsByMap then BuildTownsIndex() end
+    FinishBackground()
+    if not townsReady then
+        local start = debugprofilestop()
+        BuildTownsIndex()
+        perf.towns = debugprofilestop() - start
+    end
     local _, playerClass = UnitClass("player")
     local known = db.tfOnlyMine and KnownSkills()
-    for _, npc in ipairs(townsByMap[mapID] or {}) do
-        -- A trainer Questie's lists don't know stays visible: better too many than missing.
-        local wanted = npc.type.trainer ~= "profession" or not known or not npc.profession
-            or known[npc.profession]
-        if db[npc.type.key] and wanted and (npc.type.trainer ~= "class" or npc.class == playerClass) then
-            local x, y, pinSize = npc.x, npc.y, size
-            for _, q in ipairs(questSpots) do
-                if math.abs(q.x - x) < NEAR and math.abs(q.y - y) < NEAR then
-                    x, y, pinSize = x + NUDGE, y + NUDGE, size * 0.75
-                    break
+    local function Draw(list, toHost)
+        for _, npc in ipairs(list) do
+            -- A trainer Questie's lists don't know stays visible: better too many than missing.
+            local wanted = npc.type.trainer ~= "profession" or not known or not npc.profession
+                or known[npc.profession]
+            if db[npc.type.key] and wanted and (npc.type.trainer ~= "class" or npc.class == playerClass) then
+                local x, y, pinSize = npc.x, npc.y, size
+                if toHost then x, y = toHost(x, y) end
+                for _, q in ipairs(questSpots) do
+                    if math.abs(q.x - x) < NEAR and math.abs(q.y - y) < NEAR then
+                        x, y, pinSize = x + NUDGE, y + NUDGE, size * 0.75
+                        break
+                    end
                 end
+                local pin = map:AcquirePin(PIN, { npc = npc })
+                pin:SetPosition(x, y)
+                pin:SetSize(pinSize, pinSize)
+                pin:Show()
             end
-            local pin = map:AcquirePin(PIN, { npc = npc })
-            pin:SetPosition(x, y)
-            pin:SetSize(pinSize, pinSize)
-            pin:Show()
         end
     end
+    if townsByMap[mapID] then Draw(townsByMap[mapID]) end
+    ForNeighbours(mapID, townsByMap, function(other, toHost) Draw(townsByMap[other], toHost) end)
 end
 
 function DataProvider:RefreshAllData()
+    local start = debugprofilestop()
+    self:DrawAll()
+    perf.last = debugprofilestop() - start
+    perf.slowest = math.max(perf.slowest, perf.last)
+    perf.count = perf.count + 1
+end
+
+function DataProvider:DrawAll()
     self:RemoveAllData()
     if not db then return end
     local mapID = self:GetMap():GetMapID()
@@ -479,27 +587,37 @@ end
 function DataProvider:AddQuestPins(mapID, size)
     local placed = {}
     if not db.showPins then return placed end
-    if not byMap then BuildIndex() end
-    local spots = byMap[mapID]
-    if not spots then return placed end
+    FinishBackground()
+    if not questReady then
+        local start = debugprofilestop()
+        BuildIndex()
+        perf.quests = debugprofilestop() - start
+    end
     RefreshPlayer()
     if db.holidays and holidayDay ~= C_DateAndTime.GetCurrentCalendarTime().monthDay then ReadHolidays() end
-    for _, spot in pairs(spots) do
-        local names
-        for _, questID in ipairs(spot.quests) do
-            if IsAvailable(questID) then
-                names = names or {}
-                names[#names + 1] = QuestName(questID)
+    local map = self:GetMap()
+    local function Draw(spots, toHost)
+        for _, spot in pairs(spots) do
+            local names
+            for _, questID in ipairs(spot.quests) do
+                if IsAvailable(questID) then
+                    names = names or {}
+                    names[#names + 1] = QuestName(questID)
+                end
+            end
+            if names then
+                local x, y = spot.x, spot.y
+                if toHost then x, y = toHost(x, y) end
+                local pin = map:AcquirePin(PIN, { quests = names })
+                pin:SetPosition(x, y)
+                pin:SetSize(size, size)
+                pin:Show()
+                placed[#placed + 1] = { x = x, y = y }
             end
         end
-        if names then
-            local pin = self:GetMap():AcquirePin(PIN, { quests = names })
-            pin:SetPosition(spot.x, spot.y)
-            pin:SetSize(size, size)
-            pin:Show()
-            placed[#placed + 1] = spot
-        end
     end
+    if byMap[mapID] then Draw(byMap[mapID]) end
+    ForNeighbours(mapID, byMap, function(other, toHost) Draw(byMap[other], toHost) end)
     return placed
 end
 
@@ -562,12 +680,23 @@ SlashCmdList.BETTERQUESTPINS = function(msg)
         Print("quest pins " .. (db.showPins and "on" or "off"))
     elseif cmd == "why" and tonumber(arg) then
         ExplainNpc(tonumber(arg))
+    elseif cmd == "perf" then
+        local pins = 0
+        for _ in WorldMapFrame:EnumeratePinsByTemplate(PIN) do pins = pins + 1 end
+        Print(("map redraw: last %.1f ms, slowest %.1f ms, %d redraws, %d pins on the map now"):format(
+            perf.last, perf.slowest, perf.count, pins))
+        if perf.quests == 0 and perf.towns == 0 and perf.background then
+            Print(("one-time index: built in the background after login%s"):format(background and " (still running)" or ""))
+        else
+            Print(("one-time index: quests %.1f ms, townsfolk %.1f ms"):format(perf.quests, perf.towns))
+        end
     else
         Print("commands:")
         print("  /bqp - open settings")
         print("  /bqp town - open the townsfolk settings")
         print("  /bqp pins - turn quest pins on or off")
         print("  /bqp why <npcID> - explain why an NPC has a townsfolk pin or not")
+        print("  /bqp perf - how long the map redraws take")
     end
 end
 
@@ -590,6 +719,7 @@ events:SetScript("OnEvent", function(self, event, name)
         if db[k] == nil then db[k] = v end
     end
     RegisterSettings()
+    C_Timer.After(3, StartBackground)
     -- Calendar data loads after a request; CALENDAR_UPDATE_EVENT_LIST says it arrived.
     if C_Calendar and C_Calendar.OpenCalendar then
         self:RegisterEvent("CALENDAR_UPDATE_EVENT_LIST")

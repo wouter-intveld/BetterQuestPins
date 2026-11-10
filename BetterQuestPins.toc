@@ -18,6 +18,7 @@
 ## X-License: GPL-3.0-or-later
 ## X-Curse-Project-ID: 1786993
 ## Dependencies: QuestieDB
+## OptionalDeps: OpenMap
 ## SavedVariables: BetterQuestPinsDB
 ## IconTexture: Interface\AddOns\BetterQuestPins\icon
 
