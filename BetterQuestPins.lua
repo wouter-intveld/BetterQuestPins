@@ -130,6 +130,7 @@ local function BuildIndex()
         end
     end
     questReady = true
+    ns.BLACKLIST = nil -- only the build reads it: 2,491 entries, about 160 KB
 end
 
 ---------------------------------------------------------------------------
@@ -784,14 +785,18 @@ SlashCmdList.BETTERQUESTPINS = function(msg)
     elseif cmd == "why" and tonumber(arg) then
         ExplainNpc(tonumber(arg))
     elseif cmd == "perf" then
-        local pins, spots, spawns = 0, 0, 0
+        local pins, spare, spots, spawns = 0, 0, 0, 0
         for _ in WorldMapFrame:EnumeratePinsByTemplate(PIN) do pins = pins + 1 end
+        -- The map keeps every pin it ever needed at once; each holds a copy of the pin mixin.
+        local pool = WorldMapFrame.pinPools and WorldMapFrame.pinPools[PIN]
+        if pool then for _ in pool:EnumerateInactive() do spare = spare + 1 end end
         for _, list in pairs(byMap or {}) do spots = spots + #list end
         for _, list in pairs(townsByMap or {}) do spawns = spawns + #list end
         collectgarbage("collect") -- what is held, not what is waiting to be freed
         UpdateAddOnMemoryUsage()
-        Print(("memory %.1f KB after a collection; %d quest spots and %d townsfolk spawns indexed, %d pins on the map now"):format(
-            GetAddOnMemoryUsage(ADDON), spots, spawns, pins))
+        Print(("memory %.1f KB after a collection; %d quest spots and %d townsfolk spawns indexed"):format(
+            GetAddOnMemoryUsage(ADDON), spots, spawns))
+        Print(("pins: %d on the map now, %d more kept by the map for reuse"):format(pins, spare))
         Print(("map redraw: last %.1f ms, slowest %.1f ms, %d redraws"):format(perf.last, perf.slowest, perf.count))
         Print(("index, built in the background: quests %.1f ms, townsfolk %.1f ms%s"):format(
             perf.quests, perf.towns, jobs[1] and " (still building)" or ""))
