@@ -32,29 +32,34 @@ do
     end
 end
 
--- uiMapID -> { [quest giver location key] = { x, y, quests = { questID, ... } } }
--- Built once, the first time the world map shows: a pass over every quest in the database.
+-- uiMapID -> list of spots, each { x, y, questID, questID, ... }: a quest giver's
+-- position and the quests it starts. A plain array, since there are thousands: a
+-- record with named fields and its own quest list costs three times the memory.
+-- Built once, in the background (BuildIndex).
 local byMap
 
-local function AddStarter(questID, spawns)
+-- lookup: mapID -> { ["x:y"] = spot }, so the quests of one giver share a spot; dropped after the build.
+local function AddStarter(questID, spawns, lookup)
     for areaID, coords in pairs(spawns) do
         local mapID = areaToMap[areaID]
         if mapID and mapID > 0 then
-            local spots = byMap[mapID]
+            local spots, keys = byMap[mapID], lookup[mapID]
             if not spots then
-                spots = {}
-                byMap[mapID] = spots
+                spots, keys = {}, {}
+                byMap[mapID], lookup[mapID] = spots, keys
             end
             for _, coord in ipairs(coords) do
                 local x, y = coord[1], coord[2]
                 if x and y and x >= 0 and y >= 0 then
                     local key = ("%.1f:%.1f"):format(x, y)
-                    local spot = spots[key]
-                    if not spot then
-                        spot = { x = x / 100, y = y / 100, quests = {} }
-                        spots[key] = spot
+                    local spot = keys[key]
+                    if spot then
+                        spot[#spot + 1] = questID
+                    else
+                        spot = { x / 100, y / 100, questID }
+                        keys[key] = spot
+                        spots[#spots + 1] = spot
                     end
-                    spot.quests[#spot.quests + 1] = questID
                 end
             end
         end
@@ -104,6 +109,7 @@ end
 
 local function BuildIndex()
     byMap = {}
+    local lookup = {}
     for i, questID in ipairs(QuestDB.GetAllIds()) do
         Pause(i)
         -- Unnamed entries are placeholders the database knows only by ID; blacklisted
@@ -115,11 +121,11 @@ local function BuildIndex()
         if starters then
             for _, npcID in ipairs(starters[1] or {}) do
                 local spawns = NpcDB.spawns(npcID)
-                if spawns then AddStarter(questID, spawns) end
+                if spawns then AddStarter(questID, spawns, lookup) end
             end
             for _, objectID in ipairs(starters[2] or {}) do
                 local spawns = ObjectDB.spawns(objectID)
-                if spawns then AddStarter(questID, spawns) end
+                if spawns then AddStarter(questID, spawns, lookup) end
             end
         end
     end
@@ -299,6 +305,11 @@ local TOWNSFOLK = {
     { key = "tfStable", flag = FLAGS.STABLEMASTER, icon = "StableMaster", name = "Stable masters" },
 }
 
+-- A townsfolk entry is an array, { x, y, type, name, sub, class, profession }: a
+-- record with named fields would cost more than twice the memory, and there are
+-- thousands. These name its slots.
+local X, Y, TYPE, NAME, SUB, CLASS, PROF = 1, 2, 3, 4, 5, 6, 7
+
 -- Trainers share one flag; the subname ("Mage Trainer") tells class from
 -- profession. The class names are the client's own, so this works in any language.
 local function TrainerClass(npcID, sub)
@@ -310,8 +321,8 @@ local function TrainerClass(npcID, sub)
     end
 end
 
--- uiMapID -> list of { x, y, type, name, sub, class }, friendly NPCs only.
--- Built once, the first time a townsfolk type is ticked: a pass over every NPC.
+-- uiMapID -> list of entries (X, Y, TYPE, ... above), friendly NPCs only.
+-- Built once, in the background, when a townsfolk type is first ticked.
 local townsByMap
 
 local function BuildTownsIndex()
@@ -342,8 +353,7 @@ local function BuildTownsIndex()
                             townsByMap[mapID] = list
                             for _, c in ipairs(coords) do
                                 if c[1] and c[2] and c[1] >= 0 and c[2] >= 0 then
-                                    list[#list + 1] = { x = c[1] / 100, y = c[2] / 100, type = t,
-                                        name = name, sub = sub, class = class, profession = profession }
+                                    list[#list + 1] = { c[1] / 100, c[2] / 100, t, name, sub, class, profession }
                                 end
                             end
                         end
@@ -370,16 +380,17 @@ local function ExplainNpc(npcID)
         local mapID = areaToMap[areaID]
         local found = 0
         for _, npc in ipairs(townsByMap and townsByMap[mapID or 0] or {}) do
-            if npc.name == NpcDB.name(npcID) then
+            if npc[NAME] == NpcDB.name(npcID) then
                 found = found + 1
-                print(("  entry: %s (%s, ticked %s), class %s, at %.3f %.3f"):format(npc.type.name, npc.type.key,
-                    tostring(db[npc.type.key]), tostring(npc.class), npc.x, npc.y))
+                local t = npc[TYPE]
+                print(("  entry: %s (%s, ticked %s), class %s, at %.3f %.3f"):format(t.name, t.key,
+                    tostring(db[t.key]), tostring(npc[CLASS]), npc[X], npc[Y]))
             end
         end
         if WorldMapFrame:IsShown() then
             local pins = 0
             for pin in WorldMapFrame:EnumeratePinsByTemplate("BetterQuestPinsPinTemplate") do
-                if pin.info and pin.info.npc and pin.info.npc.name == NpcDB.name(npcID) then pins = pins + 1 end
+                if pin.info and pin.info.npc and pin.info.npc[NAME] == NpcDB.name(npcID) then pins = pins + 1 end
             end
             print(("  open map %d, pins for this NPC: %d"):format(WorldMapFrame:GetMapID() or 0, pins))
         end
@@ -451,11 +462,11 @@ function BetterQuestPinsPinMixin:OnLoad()
     self:UseFrameLevelType("PIN_FRAME_LEVEL_QUEST_PING")
 end
 
--- info: { quests = { name, ... } } for a quest giver, or { npc = spot } for townsfolk.
+-- info: { quests = { name, ... } } for a quest giver, or { npc = entry } for townsfolk.
 function BetterQuestPinsPinMixin:OnAcquired(info)
     self.info = info
     if info.npc then
-        self.Texture:SetTexture(TRACKING .. info.npc.type.icon)
+        self.Texture:SetTexture(TRACKING .. info.npc[TYPE].icon)
     else
         self.Texture:SetAtlas("QuestNormal")
     end
@@ -483,8 +494,8 @@ function BetterQuestPinsPinMixin:OnMouseEnter()
         end
     end
     for _, npc in ipairs(npcs) do
-        tooltip:AddLine(npc.name, 1, 1, 1)
-        tooltip:AddLine(npc.sub or npc.type.name, 0.6, 0.6, 0.6)
+        tooltip:AddLine(npc[NAME], 1, 1, 1)
+        tooltip:AddLine(npc[SUB] or npc[TYPE].name, 0.6, 0.6, 0.6)
     end
     tooltip:Show()
 end
@@ -623,11 +634,11 @@ local function AddTownsfolkPins(map, mapID, size, questPins)
     local known = db.tfOnlyMine and knownSkills or nil
     local function Draw(list, toHost)
         for _, npc in ipairs(list) do
+            local t, profession = npc[TYPE], npc[PROF]
             -- A trainer Questie's lists don't know stays visible: better too many than missing.
-            local wanted = npc.type.trainer ~= "profession" or not known or not npc.profession
-                or known[npc.profession]
-            if db[npc.type.key] and wanted and (npc.type.trainer ~= "class" or npc.class == player.class) then
-                local x, y, pinSize = npc.x, npc.y, size
+            local wanted = t.trainer ~= "profession" or not known or not profession or known[profession]
+            if db[t.key] and wanted and (t.trainer ~= "class" or npc[CLASS] == player.class) then
+                local x, y, pinSize = npc[X], npc[Y], size
                 if toHost then x, y = toHost(x, y) end
                 if NearQuestPin(questPins, x, y) then
                     x, y, pinSize = x + NUDGE, y + NUDGE, size * 0.75
@@ -678,16 +689,17 @@ function DataProvider:AddQuestPins(mapID, size)
     if db.holidays and holidayDay ~= C_DateAndTime.GetCurrentCalendarTime().monthDay then ReadHolidays() end
     local map = self:GetMap()
     local function Draw(spots, toHost)
-        for _, spot in pairs(spots) do
+        for _, spot in ipairs(spots) do
             local names
-            for _, questID in ipairs(spot.quests) do
+            for i = 3, #spot do
+                local questID = spot[i]
                 if IsAvailable(questID) then
                     names = names or {}
                     names[#names + 1] = QuestName(questID)
                 end
             end
             if names then
-                local x, y = spot.x, spot.y
+                local x, y = spot[1], spot[2]
                 if toHost then x, y = toHost(x, y) end
                 local pin = map:AcquirePin(PIN, { quests = names })
                 pin:SetPosition(x, y)
@@ -772,10 +784,14 @@ SlashCmdList.BETTERQUESTPINS = function(msg)
     elseif cmd == "why" and tonumber(arg) then
         ExplainNpc(tonumber(arg))
     elseif cmd == "perf" then
-        local pins = 0
+        local pins, spots, spawns = 0, 0, 0
         for _ in WorldMapFrame:EnumeratePinsByTemplate(PIN) do pins = pins + 1 end
+        for _, list in pairs(byMap or {}) do spots = spots + #list end
+        for _, list in pairs(townsByMap or {}) do spawns = spawns + #list end
+        collectgarbage("collect") -- what is held, not what is waiting to be freed
         UpdateAddOnMemoryUsage()
-        Print(("memory %.1f KB, %d pins on the map now"):format(GetAddOnMemoryUsage(ADDON), pins))
+        Print(("memory %.1f KB after a collection; %d quest spots and %d townsfolk spawns indexed, %d pins on the map now"):format(
+            GetAddOnMemoryUsage(ADDON), spots, spawns, pins))
         Print(("map redraw: last %.1f ms, slowest %.1f ms, %d redraws"):format(perf.last, perf.slowest, perf.count))
         Print(("index, built in the background: quests %.1f ms, townsfolk %.1f ms%s"):format(
             perf.quests, perf.towns, jobs[1] and " (still building)" or ""))
