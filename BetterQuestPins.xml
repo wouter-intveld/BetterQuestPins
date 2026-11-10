@@ -12,11 +12,7 @@
 				<Texture parentKey="Texture" atlas="QuestNormal" setAllPoints="true"/>
 			</Layer>
 		</Layers>
-		<Scripts>
-			<OnLoad method="OnLoad"/>
-			<OnEnter method="OnMouseEnter"/>
-			<OnLeave method="OnMouseLeave"/>
-			<OnClick method="OnClick"/>
-		</Scripts>
+		<!-- No scripts: the map canvas calls OnLoad, OnMouseEnter, OnMouseLeave and
+		     OnClick itself, and asserts when a new pin brings its own OnEnter/OnLeave. -->
 	</Button>
 </Ui>
