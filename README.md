@@ -6,7 +6,7 @@ World of Warcraft Forever client.
 - A pin marks each quest giver: NPCs and objects such as wanted posters.
 - Only quests you can take now: not done, not in your log, your race and
   class, prerequisites done, not gray, and at most 4 levels above you (a
-  setting, from +0 to +10).
+  setting, from +0 to +10). Gray quests can be turned on in the settings.
 - Holiday quests are off by default. Turn them on and only the holidays
   running today, read from the in-game calendar, get pins. World event
   quests are left out.

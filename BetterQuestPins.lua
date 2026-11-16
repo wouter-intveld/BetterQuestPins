@@ -6,6 +6,7 @@ local ADDON, ns = ...
 local BRAND = "|cffcda552Better|rQuestPins"
 local DEFAULTS = {
     showPins = true, smallPins = false, maxAbove = 4, holidays = false,
+    showGray = false, -- also pin gray (low-level) quests
     -- Townsfolk, each type off until ticked.
     tfFlight = false, tfInn = false, tfRepair = false, tfClass = false,
     tfProfession = false, tfBanker = false, tfStable = false,
@@ -253,9 +254,9 @@ local function CheckAvailable(questID)
     local s = Static(questID)
     if s.requiredLevel > player.level then return false end
     if s.maxLevel and player.level > s.maxLevel then return false end
-    -- Gray quests give nothing worth the walk; red ones are allowed, but not
-    -- something to walk to yet.
-    if s.level and (s.level < player.grayBelow or s.level > player.level + db.maxAbove) then return false end
+    -- Gray quests give little worth the walk, so they're opt-in; red ones are
+    -- allowed, but not something to walk to yet.
+    if s.level and ((s.level < player.grayBelow and not db.showGray) or s.level > player.level + db.maxAbove) then return false end
     local holiday = holidaySortOf[questID]
     if holiday and not (db.holidays and activeHolidays[holiday]) then return false end
     if s.races and bit.band(s.races, player.raceBit) == 0 then return false end
@@ -477,7 +478,8 @@ function BetterQuestPinsPinMixin:OnLoad()
     self:UseFrameLevelType("PIN_FRAME_LEVEL_QUEST_PING")
 end
 
--- info: { quests = { name, ... } } for a quest giver, or { npc = entry } for townsfolk.
+-- info: { quests = { name, ... }, gray = only gray quests } for a quest giver,
+-- or { npc = entry } for townsfolk.
 function BetterQuestPinsPinMixin:OnAcquired(info)
     self.info = info
     if info.npc then
@@ -485,6 +487,9 @@ function BetterQuestPinsPinMixin:OnAcquired(info)
     else
         self.Texture:SetAtlas("QuestNormal")
     end
+    -- Pins are reused, so set the tint every time.
+    self.Texture:SetDesaturated(info.gray or false)
+    self.Texture:SetAlpha(info.gray and 0.75 or 1)
 end
 
 -- Lists everything under the cursor, since pins at one spot overlap.
@@ -705,18 +710,20 @@ function DataProvider:AddQuestPins(mapID, size)
     local map = self:GetMap()
     local function Draw(spots, toHost)
         for _, spot in ipairs(spots) do
-            local names
+            local names, gray = nil, true
             for i = 3, #spot do
                 local questID = spot[i]
                 if IsAvailable(questID) then
                     names = names or {}
                     names[#names + 1] = QuestName(questID)
+                    local level = Static(questID).level
+                    if not (level and level < player.grayBelow) then gray = false end
                 end
             end
             if names then
                 local x, y = spot[1], spot[2]
                 if toHost then x, y = toHost(x, y) end
-                local pin = map:AcquirePin(PIN, { quests = names })
+                local pin = map:AcquirePin(PIN, { quests = names, gray = gray })
                 pin:SetPosition(x, y)
                 pin:SetSize(size, size)
                 pin:Show()
@@ -769,6 +776,7 @@ local function RegisterSettings()
         return ("+%d"):format(value)
     end)
     Settings.CreateSlider(category, above, options, "Hide quests more than this many levels above you.")
+    Checkbox("showGray", "Gray quests", "Also pin quests so far below your level that they show gray.")
     Checkbox("holidays", "Holiday quests", "Also pin quests of a holiday that is running today, like the Darkmoon Faire or Hallow's End.")
 
     category = Settings.RegisterVerticalLayoutSubcategory(main, "Townsfolk")
