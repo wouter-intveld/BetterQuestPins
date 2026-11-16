@@ -107,6 +107,13 @@ local function Pause(i)
     if i % YIELD_EVERY == 0 then coroutine.yield() end
 end
 
+-- Our own fixes for starter positions QuestieDB has wrong, as players report them:
+-- questID -> { [areaID] = { { x, y } } }, used instead of the database's spawns.
+-- Drop an entry once QuestieDB has the right position.
+local START_CORRECTIONS = {
+    [86614] = { [38] = { { 48, 40 } } }, -- Silver of the Waves: the toolbox on the bottom of the loch, Loch Modan
+}
+
 local function BuildIndex()
     byMap = {}
     local lookup = {}
@@ -118,7 +125,9 @@ local function BuildIndex()
         if HOLIDAY_SORTS[sort] then holidaySortOf[questID] = sort end
         local starters = not ns.BLACKLIST[questID] and not EVENT_SORTS[sort] and QuestDB.name(questID)
             and QuestDB.startedBy(questID)
-        if starters then
+        if starters and START_CORRECTIONS[questID] then
+            AddStarter(questID, START_CORRECTIONS[questID], lookup)
+        elseif starters then
             for _, npcID in ipairs(starters[1] or {}) do
                 local spawns = NpcDB.spawns(npcID)
                 if spawns then AddStarter(questID, spawns, lookup) end
